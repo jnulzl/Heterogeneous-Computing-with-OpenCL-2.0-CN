@@ -9,22 +9,6 @@
 
 ---
 
-## 模版来源
-
-版式、字体、页边距、章首装饰、代码清单标题条、图注样式、页眉页脚等**全部沿用**
-`D:/Ego/trans/CPP-17-STL-cookbook/latex_source`（Manning 风格模版，`book/ccs.tex`）。
-
-相对模版只做了四处适配，均在 `book/ccs.tex` 里有注释说明：
-
-| 改动 | 原因 |
-|---|---|
-| 新增 `\myFormula{宽}{图}{编号}` | 本书公式以图片给出，需要「居中 + 编号右对齐」的行间公式版式 |
-| 新增 `myRefs` / `mySign` / `\myRefRule` | 译稿用「-----」分隔线引出节末注释与参考文献，需要小字悬挂缩进版式 |
-| `\my_breakinject` 增加「:」为自然断点 | `concurrency::array_view` 这类标识符在 `::` 处折行，避免生切成 `con\|currency` |
-| `\myGraphic` 由原地排版改为 `figure[!htbp]` 浮动体 | 原地「居中 + `\nopagebreak`」在页面快满时会把图注单独挤到下一页；改浮动后图与图注永不分离，且页底大块空白从 20 页（最大 400pt）降到 7 页（其中 6 页是章末自然留白） |
-
----
-
 ## 目录结构
 
 ```
@@ -43,19 +27,6 @@ latex_source/                     # 本目录即工程根
         ├── front/                # 00-cover（封面图）/ 00-title（书名页）/ foreword（序）
         └── main/                 # chapter1.tex … chapter13.tex
 ```
-
-本次校订用的辅助脚本放在**工程根**的 `tools/`（与 `latex_source/tools/` 不是同一个目录），需从工程根运行：
-
-| 脚本 | 作用 |
-|---|---|
-| `tools/extract_figures.py` | 从英文原版 PDF 裁切全部插图 → `images_src/<章>/<图号>.png`，并写出 `images_src/rects.json` |
-| `tools/fix_captions.py` | 整批重写各章 `\myGraphic` 的图片路径、图注与宽度 |
-
-> `book/content/*.tex` 目前是**唯一正本**：原 Markdown 译稿（`content/`）已不在工程内，且这些 tex 已包含人工校订，
-> `tools/convert.py` 只用于首次生成或新增章节（`--chapter N`），**整体重跑会覆盖校订成果**。
-
-> 正文源文件必须放 `book/content/` 下：`\subfile` 的相对基准是 `book/`，图片路径写作 `images/...`（相对工程根）。
-> 上一级目录放原书 PDF（`Heterogeneous Computing with OpenCL 2.0.pdf`）、裁切出的插图（`images_src/`）与校订记录（`work/`）。
 
 ---
 
@@ -91,50 +62,6 @@ xelatex -shell-escape -interaction=nonstopmode main.tex     # 跑三遍
 - `-shell-escape` 是必须的（minted 调外部高亮器）。
 - **必须三遍**：目录、书签、交叉引用要收敛；封面用 `remember picture` 定位。
 - 耗时：缓存清空后首遍约 4–5 分钟（202 个代码块逐个高亮），第二、三遍各约 1 分钟。
-
----
-
-## 校订与插图（2026-11-03）
-
-以工程根的英文原版 PDF 为准，对译文和插图各做了一轮全面校订。
-
-### 1. 译文校订：282 处
-
-逐章对照英文原文核对，改动存于 `work/fix/ch01…ch13.json`（每条含 `file`/`line`/`before`/`after`/`why`，可回溯），
-应用时强制校验「`before` 在该文件中恰好出现 1 次」，不满足即跳过。
-
-| 类别 | 典型修正 |
-|---|---|
-| 术语统一 | work-item 工作项、work-group 工作组、kernel 内核、command-queue 命令队列、compute unit 计算单元、processing element 处理单元、local/constant/global/private memory 局部/常量/全局/私有内存、coalescing 合并访问、reduction 归约、barrier 栅栏 |
-| 明显误译 | `波面阵` → `波前`（wavefront，53 处）；「线程块」→「线程束」（warp）；`一副`→`一幅`；`的的`→`的` |
-| 语义/数量偏差 | 按原文补齐漏译的限定语、修正数量与单位、订正代码标识符拼写（`cl_mem` 等按 LaTeX 规则转义） |
-| 体例统一 | `程序清单` → `代码清单`（31 处）；「表中展示了…」→「图中展示了…」 |
-
-第 3 章另有一处结构性调整：clinfo 的输出在原书里是 **Listing 3.2**，中文版误排成了图，已改回 `codeboxt` 代码清单。
-
-### 2. 插图全部重做
-
-原工程的插图是随译稿仓库提供的位图（多为 EPUB 提取），分辨率偏低、与英文版图号也不完全对齐。现改为直接从英文原版 PDF 裁切：
-
-- `tools/extract_figures.py`：逐页按 `FIGURE X.Y` 图注定位，把图注**上方**的视觉元素（位图、矢量绘图、小字号标注文字）求并集 →
-  400 dpi 渲染 → 自动裁白边 → `images_src/<章>/<图号>.png`。页眉页脚横线（高 < 2pt 且宽 > 380pt）与正文字号（≥ 9.4pt）
-  作为边界排除；5 处特殊版式（图上方紧跟代码块/表格、子图标注低于图体）用 `OVERRIDES` 手工限界。
-- `tools/fix_captions.py`：整批重写 `\myGraphic` —— 路径换成 `images/chapter<N>/<N>-<M>.png`，图注按英文原版重译（81 条），
-  宽度按图片宽高比自适应（`0.95 × w/h`，限制在 0.36–0.85 倍版心）。
-
-结果：正文 84 张图（82 个 `\myGraphic` + 2 个 `\myFormula` 公式图），与英文原版图号一一对应。
-两个特例：第 11 章原书的 11.1、11.3–11.7 是代码清单，中文版排成 `codeboxt`，只保留 11.2 为图；
-书末二项期权柱状图为中文版增补，编号 **图 11.8**。
-
-### 3. 排版检查结果
-
-| 项目 | 结果 |
-|---|---|
-| 页数 | 306 页 |
-| 编译错误 | 0 |
-| Overfull box | 9 处，均 ≤ 9.7pt（表格单元格内一行字） |
-| 图注分离 | 无（`figure[!htbp]` 浮动放置后彻底消除） |
-| 页底大块空白（> 200pt） | 7 页，其中 6 页为章末自然留白 |
 
 ---
 
