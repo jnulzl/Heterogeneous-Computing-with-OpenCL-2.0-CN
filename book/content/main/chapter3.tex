@@ -1,0 +1,1380 @@
+% ============================================================
+%  第3章 介绍OpenCL
+%  源文件：content/chapter3/
+% ============================================================
+
+
+% ---- 3.1-chinese.md ----
+\section{简介OpenCL}
+
+本章就来介绍一下OpenCL，使用OpenCL可以让我们的程序内部并发的执行。编程者们只要熟悉C和C++，上手OpenCL几乎就不是什么难事。我们先从OpenCL的标准说起。
+
+\subsection{OpenCL标准}
+
+OpenCL最初由苹果公司(Apple)提出(其他合作公司有AMD，IBM，Qualcomm(高通)，Intel和NVIDIA)，之后交由非盈利组织Khronos维护。最初的1.0版标准，由Khronos在2008年发布。OpenCL 1.0定义了主机端的接口，以及使用C语言作为OpenCL内核书写的语言，内核就是在不同的异构设备上并行处理数据的单位。之后的几年，发布了OpenCL 1.1和OpenCL 1.2，新标准为OpenCL增加了很多特性，比如：提高与OpenGL的互动性，补充了很多图像格式，同步事件，设备划分等特性。2013年11月，Khronos组织正式发布了OpenCL 2.0标准。为OpenCL添加了更多的新特性，比如：共享虚拟内存、内核嵌套并行和通用地址空间。这些更加高级的功能会让并行开发变得越来越简单，并且提高了OpenCL应用执行的效率。
+
+开源编程标准设计者也要面对很多的挑战，为了形成一套通用的编程标准，要对一些要求进行一定的取舍。Khronos在这方面做得很不错，其设计的API都能很好的兼容不同的架构，并且能让硬件发挥其最大的性能。只要正确的遵循编程标准，那么一套程序几乎不用做什么修改，就可以从一个硬件平台，移植到另一个硬件平台上。供应商和设备分离的编程模型给OpenCL带来了极佳的可移植性，使其能充分发挥不同平台的加速能力。
+
+执行在OpenCL设备上的代码，与执行在CPU上的不同，其使用OpenCL C进行书写。OpenCl C遵循更加严格的C99标准，在此基础上进行了适当的扩展，使其能在各种异构设备上以数据并行的方式执行。新标准中OpenCL C编程实现了C11标准中的原子操作(其子集)和同步操作。因为OpenCL API本身是C API，那么第三方就将其绑定到很多语言上，比如：Java，C++，Python和.NET。除此之外，很多主流库(线性代数和机器视觉)都集成了OpenCL，为的就是在异构平台上获得实质性的性能提升。
+
+\subsection{OpenCL标准}
+
+OpenCL标准分为四部分，每一部分都用“模型”来定义。这里先简单的介绍一下，之后的章节中会进行详细的介绍：
+
+\textbf{平台模型}：指定一个host处理器，用于任务的调度。以及一个或多个device处理器，用于执行OpenCL任务(OpenCL C Kernel)。这里将硬件抽象成了对应的设备(host或device)。
+
+\textbf{执行模型}：定义了OpenCL在host上运行的环境应该如何配置，以及host如何指定设备执行某项工作。这里就包括host运行的环境，host-device交互的机制，以及配置内核时使用到的并发模型。并发模型定义了如何将算法分解成OpenCL工作项和工作组。
+
+\textbf{内核编程模型}：定义了并发模型如何映射到实际物理硬件。
+
+\textbf{内存模型}：定义了内存对象的类型，并且抽象了内存层次，这样内核就不用了解其使用内存的实际架构。其也包括内存排序的要求，并且选择性支持host和device的共享虚拟内存。
+
+通常情况下，OpenCL实现的执行平台包括一个x86 CPU主处理器，和一个GPU设备作为加速器。主处理器会将内核放置在GPU上运行，并且发出指令让GPU按照某个特定的并行方式进行执行。内核使用到的内存数据都由编程者依据层级内存模型分配或开辟。运行时和驱动层会将抽象的内存区域映射到物理内存层面。最后，由GPU开辟硬件线程来对内核进行执行，并且将每个线程映射到对应的硬件单元上。这些模型的细节将会在之后进行详细的讨论。
+
+本章开始介绍OpenCL模型，包括OpenCL的API和相关的模型。介绍完API之后，我们将会使用矢量相加的例子让大家更好地对OpenCL编程进行了解。矢量相加的源码会在3.6节的末尾给出。我们将会使用OpenCL C++ API对矢量相加进行实现，并对CUDA编程和OpenCL编程进行比较。
+
+
+
+% ---- 3.2-chinese.md ----
+\section{OpenCL平台模型}
+
+OpenCL平台需要包含一个主处理器和一个或多个OpenCL设备。平台模型定义了host和device的角色，并且为device提供了一种抽象的硬件模型。一个device可以被划分成一个或多个计算单元，这些计算单元在之后能被分成一个或多个“处理单元”(\emph{processing elements})。具体的关系可见图3.1。
+
+\myGraphic{0.92}{images/chapter3/3-1.png}{图3.1 OpenCL平台具有多个计算设备。每个计算设备都具有一个或多个计算单元。一个计算单元又由一个或多个处理元素(PEs)构成。系统中可以同时具有多个平台。例如，在一个系统中可以既有AMD的平台和Intel的平台。}
+
+平台模型是应用开发的重点，其保证了OpenCL代码的可移植性(在具有OpenCL能力的系统间)。即使只在一个系统中，这个系统也可以具有多个不同的OpenCL平台，这些平台可以被不同的应用所使用。平台模型的API允许一个OpenCL应用能够适应和选择对应的平台和计算设备，从而在相应平台和设备上运行应用。
+
+应用可以使用OpenCL运行时API，选择对应提供商提供的对应平台。不过，平台上能指定和互动的设备，也只限于供应商提供的那些设备。例如，如果选择了A公司的平台，那么就不能使用B公司的GPU。不过，平台硬件并不需要由供应商独家提供。例如，AMD和Intel的实现可以使用其他公司的x86 CPU作为设备。
+
+编程者写编写OpenCL C代码时，设备架构会被抽象成平台模型。供应商只需要将抽象的架构映射到对应的物理硬件上即可。平台模型定义了具有一组计算单元的设备，且每个计算单元的功能都是独立的。计算单元也可以划分成更多个处理单元。图3.1展示的就是这样的一种层级模型。举个例子，AMD Radeon R9 290X图形卡(device)包含44个向量处理器(计算单元)。每个计算单元都由4个16通道SIMD引擎，一共就有64个SIMD通道(处理单元)。Radeon R9 290X上每个SIMD通道都能处理一个标量指令。运行GPU设备能同时执行44x16x4=2816条指令。
+
+\subsection{平台和设备}
+
+\texttt{clGetPlatformIDs()}这个API就是查找制定系统上的可用OpenCL平台的集合。在具体的OpenCL程序中，这个API一般会调用两次，用来查询和获取到对应的平台信息。第一次调用这个API需要传入\texttt{num\_platforms}作为数量参数，传入NULL作为平台参数。这样就能获取在该系统上有多少个平台可供使用。编程者可以开辟对应大小的空间(指针命名为platforms)，来存放对应的平台对象(类型为 cl\_\allowbreak{}platform\_\allowbreak{}id)。第二次调用该API是，就可将platforms传入来获取对应数量的平台对象。平台查找完成后，使用\texttt{clGetPlatformInfo()}API可以查询对应供应商所提供的平台，然后决定使用哪个平台进行运行OpenCL程序。\texttt{clGetPlatformIDs()}这个API需要在其他API之前调用，3.6节中可以从矢量相加的源码中进一步了解。
+
+\begin{codebox}[cpp]
+cl_int
+clGetPlatformIDs(
+  cl_uint num_entries,
+  cl_platform_id *platforms,
+  cl_uint *num_platforms)
+\end{codebox}
+
+当平台确定好之后，下一步就是要查询平台上可用的设备了。\texttt{clGetDeviceIDs()}API就是用来做这件事的，并且在使用流程上和\texttt{clGetPlatformIDs()}很类似。\texttt{clGetDeviceIDs()}多了平台对象和设备类型作为入参，不过也需要简单的三步就能创建device：第一，查询设备的数量；第二，分配对应数量的空间来存放设备对象；第三，选择期望使用的设备(确定设备对象)。\texttt{device\_type}参数可以将设备限定为GPU(CL\_\allowbreak{}DEVICE\_\allowbreak{}TYPE\_\allowbreak{}GPU)，限定为CPU(CL\_\allowbreak{}DEVICE\_\allowbreak{}TYPE\_\allowbreak{}CPU)，或所有设备(CL\_\allowbreak{}DEVICE\_\allowbreak{}TYPE\_\allowbreak{}ALL)，当然还有其他选项。这些参数都必须传递给\texttt{clGetDeviceIDs()}。相较于平台的查询API，\texttt{clGetDeviceInfo()}API可用来查询每个设备的名称、类型和供应商。
+
+\begin{codebox}[cpp]
+cl_int
+clGetDeviceIDs(
+  cl_platform_id platform,
+  cl_device_type device_type,
+  cl_uint num_entries,
+  cl_device_id *devices,
+  cl_uint *num_devices)
+\end{codebox}
+
+AMD的并行加速处理软件开发工具(APP SDK)中有一个clinfo的程序，其使用\texttt{clGetPlatformInfo()}和\texttt{clGetDeviceInfo()}来获取对应系统中的平台和设备信息。硬件信息，比如内存总量和总线带宽也是可以用该程序获取。在了解其他OpenCL特性之前，我们先休息一下，了解一下clinfo的输入，如图3.2。
+
+译者机器的clinfo显示，译者和原书使用的AMD APP SDK版本不大一样。从观察上来看，原书应该隐藏了一些硬件显示。
+
+\begin{codebox}[text]
+Number of platforms:                             3
+  Platform Profile:                              FULL_PROFILE
+  Platform Version:                              OpenCL 1.2 CUDA 8.0.0
+  Platform Name:                                 NVIDIA CUDA
+  Platform Vendor:                               NVIDIA Corporation
+  Platform Extensions:
+   cl_khr_global_int32_base_atomics
+   cl_khr_global_int32_extended_atomics
+   cl_khr_local_int32_base_atomics
+   cl_khr_local_int32_extended_atomics
+   cl_khr_fp64
+   cl_khr_byte_addressable_store
+   cl_khr_icd cl_khr_gl_sharing
+   cl_nv_compiler_options
+   cl_nv_device_attribute_query
+   cl_nv_pragma_unroll
+   cl_nv_d3d10_sharing
+   cl_khr_d3d10_sharing
+   cl_nv_d3d11_sharing
+   cl_nv_copy_opts
+
+  Platform Profile:                              FULL_PROFILE
+  Platform Version:                              OpenCL 1.2
+  Platform Name:                                 Intel(R) OpenCL
+  Platform Vendor:                               Intel(R) Corporation
+  Platform Extensions:
+   cl_intel_dx9_media_sharing
+   cl_khr_3d_image_writes
+   cl_khr_byte_addressable_store
+   cl_khr_d3d11_sharing
+   cl_khr_depth_images
+   cl_khr_dx9_media_sharing
+   cl_khr_gl_sharing
+   cl_khr_global_int32_base_atomics
+   cl_khr_global_int32_extended_atomics
+   cl_khr_icd cl_khr_local_int32_base_atomics
+   cl_khr_local_int32_extended_atomics
+   cl_khr_spir
+  Platform Profile:                              FULL_PROFILE
+  Platform Version:                              OpenCL 2.0 AMD-APP (1800.8)
+  Platform Name:                                 AMD Accelerated Parallel Processing
+  Platform Vendor:                               Advanced Micro Devices, Inc.
+  Platform Extensions:
+   cl_khr_icd
+   cl_khr_d3d10_sharing
+   cl_khr_d3d11_sharing
+   cl_khr_dx9_media_sharing
+   cl_amd_event_callback
+   cl_amd_offline_devices
+
+  Platform Name:                                 NVIDIA CUDA
+Number of devices:                               1
+  Device Type:                                   CL_DEVICE_TYPE_GPU
+  Vendor ID:                                     10deh
+  Max compute units:                             4
+  Max work items dimensions:                     3
+    Max work items[0]:                           1024
+    Max work items[1]:                           1024
+    Max work items[2]:                           64
+  Max work group size:                           1024
+  Preferred vector width char:                   1
+  Preferred vector width short:                  1
+  Preferred vector width int:                    1
+  Preferred vector width long:                   1
+  Preferred vector width float:                  1
+  Preferred vector width double:                 1
+  Native vector width char:                      1
+  Native vector width short:                     1
+  Native vector width int:                       1
+  Native vector width long:                      1
+  Native vector width float:                     1
+  Native vector width double:                    1
+  Max clock frequency:                           862Mhz
+  Address bits:                                  64
+  Max memory allocation:                         536870912
+  Image support:                                 Yes
+  Max number of images read arguments:           256
+  Max number of images write arguments:          16
+  Max image 2D width:                            16384
+  Max image 2D height:                           16384
+  Max image 3D width:                            4096
+  Max image 3D height:                           4096
+  Max image 3D depth:                            4096
+  Max samplers within kernel:                    32
+  Max size of kernel argument:                   4352
+  Alignment (bits) of base address:              4096
+  Minimum alignment (bytes) for any datatype:    128
+  Single precision floating point capability
+    Denorms:                                     Yes
+    Quiet NaNs:                                  Yes
+    Round to nearest even:                       Yes
+    Round to zero:                               Yes
+    Round to +ve and infinity:                   Yes
+    IEEE754-2008 fused multiply-add:             Yes
+  Cache type:                                    Read/Write
+  Cache line size:                               128
+  Cache size:                                    65536
+  Global memory size:                            2147483648
+  Constant buffer size:                          65536
+  Max number of constant args:                   9
+  Local memory type:                             Scratchpad
+  Local memory size:                             49152
+  Kernel Preferred work group size multiple:     32
+  Error correction support:                      0
+  Unified memory for Host and Device:            0
+  Profiling timer resolution:                    1000
+  Device endianess:                              Little
+  Available:                                     Yes
+  Compiler available:                            Yes
+  Execution capabilities:
+    Execute OpenCL kernels:                      Yes
+    Execute native function:                     No
+  Queue on Host properties:
+    Out-of-Order:                                Yes
+    Profiling :                                  Yes
+  Platform ID:                                   000002D3A374DC10
+  Name:                                          GeForce GTX 765M
+  Vendor:                                        NVIDIA Corporation
+  Device OpenCL C version:                       OpenCL C 1.2
+  Driver version:                                375.95
+  Profile:                                       FULL_PROFILE
+  Version:                                       OpenCL 1.2 CUDA
+  Extensions:
+   cl_khr_global_int32_base_atomics
+   cl_khr_global_int32_extended_atomics
+   cl_khr_local_int32_base_atomics
+   cl_khr_local_int32_extended_atomics
+   cl_khr_fp64
+   cl_khr_byte_addressable_store
+   cl_khr_icd
+   cl_khr_gl_sharing
+   cl_nv_compiler_options
+   cl_nv_device_attribute_query
+   cl_nv_pragma_unroll
+   cl_nv_d3d10_sharing
+   cl_khr_d3d10_sharing
+   cl_nv_d3d11_sharing
+   cl_nv_copy_opts
+
+  Platform Name:                                 Intel(R) OpenCL
+Number of devices:                               2
+  Device Type:                                   CL_DEVICE_TYPE_GPU
+  Vendor ID:                                     8086h
+  Max compute units:                             20
+  Max work items dimensions:                     3
+    Max work items[0]:                           512
+    Max work items[1]:                           512
+    Max work items[2]:                           512
+  Max work group size:                           512
+  Preferred vector width char:                   1
+  Preferred vector width short:                  1
+  Preferred vector width int:                    1
+  Preferred vector width long:                   1
+  Preferred vector width float:                  1
+  Preferred vector width double:                 0
+  Native vector width char:                      1
+  Native vector width short:                     1
+  Native vector width int:                       1
+  Native vector width long:                      1
+  Native vector width float:                     1
+  Native vector width double:                    0
+  Max clock frequency:                           1150Mhz
+  Address bits:                                  64
+  Max memory allocation:                         427189862
+  Image support:                                 Yes
+  Max number of images read arguments:           128
+  Max number of images write arguments:          128
+  Max image 2D width:                            16384
+  Max image 2D height:                           16384
+  Max image 3D width:                            2048
+  Max image 3D height:                           2048
+  Max image 3D depth:                            2048
+  Max samplers within kernel:                    16
+  Max size of kernel argument:                   1024
+  Alignment (bits) of base address:              1024
+  Minimum alignment (bytes) for any datatype:    128
+  Single precision floating point capability
+    Denorms:                                     No
+    Quiet NaNs:                                  Yes
+    Round to nearest even:                       Yes
+    Round to zero:                               Yes
+    Round to +ve and infinity:                   Yes
+    IEEE754-2008 fused multiply-add:             No
+  Cache type:                                    Read/Write
+  Cache line size:                               64
+  Cache size:                                    262144
+  Global memory size:                            1708759450
+  Constant buffer size:                          65536
+  Max number of constant args:                   8
+  Local memory type:                             Scratchpad
+  Local memory size:                             65536
+  Kernel Preferred work group size multiple:     32
+  Error correction support:                      0
+  Unified memory for Host and Device:            1
+  Profiling timer resolution:                    80
+  Device endianess:                              Little
+  Available:                                     Yes
+  Compiler available:                            Yes
+  Execution capabilities:
+    Execute OpenCL kernels:                      Yes
+    Execute native function:                     No
+  Queue on Host properties:
+    Out-of-Order:                                No
+    Profiling :                                  Yes
+  Platform ID:                                   000002D3A374C760
+  Name:                                          Intel(R) HD Graphics 4600
+  Vendor:                                        Intel(R) Corporation
+  Device OpenCL C version:                       OpenCL C 1.2
+  Driver version:                                20.19.15.4531
+  Profile:                                       FULL_PROFILE
+  Version:                                       OpenCL 1.2
+  Extensions:
+   cl_intel_accelerator
+   cl_intel_advanced_motion_estimation
+   cl_intel_ctz
+   cl_intel_d3d11_nv12_media_sharing
+   cl_intel_dx9_media_sharing
+   cl_intel_motion_estimation
+   cl_intel_simultaneous_sharing
+   cl_intel_subgroups
+   cl_khr_3d_image_writes
+   cl_khr_byte_addressable_store
+   cl_khr_d3d10_sharing
+   cl_khr_d3d11_sharing
+   cl_khr_depth_images
+   cl_khr_dx9_media_sharing
+   cl_khr_gl_depth_images
+   cl_khr_gl_event
+   cl_khr_gl_msaa_sharing
+   cl_khr_global_int32_base_atomics
+   cl_khr_global_int32_extended_atomics
+   cl_khr_gl_sharing
+   cl_khr_icd
+   cl_khr_image2d_from_buffer
+   cl_khr_local_int32_base_atomics
+   cl_khr_local_int32_extended_atomics
+   cl_khr_spir
+
+  Device Type:                                   CL_DEVICE_TYPE_CPU
+  Vendor ID:                                     8086h
+  Max compute units:                             8
+  Max work items dimensions:                     3
+    Max work items[0]:                           8192
+    Max work items[1]:                           8192
+    Max work items[2]:                           8192
+  Max work group size:                           8192
+  Preferred vector width char:                   1
+  Preferred vector width short:                  1
+  Preferred vector width int:                    1
+  Preferred vector width long:                   1
+  Preferred vector width float:                  1
+  Preferred vector width double:                 1
+  Native vector width char:                      32
+  Native vector width short:                     16
+  Native vector width int:                       8
+  Native vector width long:                      4
+  Native vector width float:                     8
+  Native vector width double:                    4
+  Max clock frequency:                           2400Mhz
+  Address bits:                                  64
+  Max memory allocation:                         2126515200
+  Image support:                                 Yes
+  Max number of images read arguments:           480
+  Max number of images write arguments:          480
+  Max image 2D width:                            16384
+  Max image 2D height:                           16384
+  Max image 3D width:                            2048
+  Max image 3D height:                           2048
+  Max image 3D depth:                            2048
+  Max samplers within kernel:                    480
+  Max size of kernel argument:                   3840
+  Alignment (bits) of base address:              1024
+  Minimum alignment (bytes) for any datatype:    128
+  Single precision floating point capability
+    Denorms:                                     Yes
+    Quiet NaNs:                                  Yes
+    Round to nearest even:                       Yes
+    Round to zero:                               No
+    Round to +ve and infinity:                   No
+    IEEE754-2008 fused multiply-add:             No
+  Cache type:                                    Read/Write
+  Cache line size:                               64
+  Cache size:                                    262144
+  Global memory size:                            8506060800
+  Constant buffer size:                          131072
+  Max number of constant args:                   480
+  Local memory type:                             Global
+  Local memory size:                             32768
+  Kernel Preferred work group size multiple:     128
+  Error correction support:                      0
+  Unified memory for Host and Device:            1
+  Profiling timer resolution:                    427
+  Device endianess:                              Little
+  Available:                                     Yes
+  Compiler available:                            Yes
+  Execution capabilities:
+    Execute OpenCL kernels:                      Yes
+    Execute native function:                     Yes
+  Queue on Host properties:
+    Out-of-Order:                                Yes
+    Profiling :                                  Yes
+  Platform ID:                                   000002D3A374C760
+  Name:                                          Intel(R) Core(TM) i7-4700MQ CPU @ 2.40GHz
+  Vendor:                                        Intel(R) Corporation
+  Device OpenCL C version:                       OpenCL C 1.2
+  Driver version:                                5.2.0.10094
+  Profile:                                       FULL_PROFILE
+  Version:                                       OpenCL 1.2 (Build 10094)
+  Extensions:
+   cl_khr_icd
+   cl_khr_global_int32_base_atomics
+   cl_khr_global_int32_extended_atomics
+   cl_khr_local_int32_base_atomics
+   cl_khr_local_int32_extended_atomics
+   cl_khr_byte_addressable_store
+   cl_khr_depth_images
+   cl_khr_3d_image_writes
+   cl_intel_exec_by_local_thread
+   cl_khr_spir
+   cl_khr_dx9_media_sharing
+   cl_intel_dx9_media_sharing
+   cl_khr_d3d11_sharing
+   cl_khr_gl_sharing
+   cl_khr_fp64
+
+  Platform Name:                                 AMD Accelerated Parallel Processing
+Number of devices:                               1
+  Device Type:                                   CL_DEVICE_TYPE_CPU
+  Vendor ID:                                     1002h
+  Board name:
+  Max compute units:                             8
+  Max work items dimensions:                     3
+    Max work items[0]:                           1024
+    Max work items[1]:                           1024
+    Max work items[2]:                           1024
+  Max work group size:                           1024
+  Preferred vector width char:                   16
+  Preferred vector width short:                  8
+  Preferred vector width int:                    4
+  Preferred vector width long:                   2
+  Preferred vector width float:                  8
+  Preferred vector width double:                 4
+  Native vector width char:                      16
+  Native vector width short:                     8
+  Native vector width int:                       4
+  Native vector width long:                      2
+  Native vector width float:                     8
+  Native vector width double:                    4
+  Max clock frequency:                           2394Mhz
+  Address bits:                                  64
+  Max memory allocation:                         2147483648
+  Image support:                                 Yes
+  Max number of images read arguments:           128
+  Max number of images write arguments:          64
+  Max image 2D width:                            8192
+  Max image 2D height:                           8192
+  Max image 3D width:                            2048
+  Max image 3D height:                           2048
+  Max image 3D depth:                            2048
+  Max samplers within kernel:                    16
+  Max size of kernel argument:                   4096
+  Alignment (bits) of base address:              1024
+  Minimum alignment (bytes) for any datatype:    128
+  Single precision floating point capability
+    Denorms:                                     Yes
+    Quiet NaNs:                                  Yes
+    Round to nearest even:                       Yes
+    Round to zero:                               Yes
+    Round to +ve and infinity:                   Yes
+    IEEE754-2008 fused multiply-add:             Yes
+  Cache type:                                    Read/Write
+  Cache line size:                               64
+  Cache size:                                    32768
+  Global memory size:                            8506060800
+  Constant buffer size:                          65536
+  Max number of constant args:                   8
+  Local memory type:                             Global
+  Local memory size:                             32768
+  Max pipe arguments:                            16
+  Max pipe active reservations:                  16
+  Max pipe packet size:                          2147483648
+  Max global variable size:                      1879048192
+  Max global variable preferred total size:      1879048192
+  Max read/write image args:                     64
+  Max on device events:                          0
+  Queue on device max size:                      0
+  Max on device queues:                          0
+  Queue on device preferred size:                0
+  SVM capabilities:
+    Coarse grain buffer:                         No
+    Fine grain buffer:                           No
+    Fine grain system:                           No
+    Atomics:                                     No
+  Preferred platform atomic alignment:           0
+  Preferred global atomic alignment:             0
+  Preferred local atomic alignment:              0
+  Kernel Preferred work group size multiple:     1
+  Error correction support:                      0
+  Unified memory for Host and Device:            1
+  Profiling timer resolution:                    427
+  Device endianess:                              Little
+  Available:                                     Yes
+  Compiler available:                            Yes
+  Execution capabilities:
+    Execute OpenCL kernels:                      Yes
+    Execute native function:                     Yes
+  Queue on Host properties:
+    Out-of-Order:                                No
+    Profiling :                                  Yes
+  Queue on Device properties:
+    Out-of-Order:                                No
+    Profiling :                                  No
+  Platform ID:                                   00007FFB80F36D30
+  Name:                                          Intel(R) Core(TM) i7-4700MQ CPU @ 2.40GHz
+  Vendor:                                        GenuineIntel
+  Device OpenCL C version:                       OpenCL C 1.2
+  Driver version:                                1800.8 (sse2,avx)
+  Profile:                                       FULL_PROFILE
+  Version:                                       OpenCL 1.2 AMD-APP (1800.8)
+  Extensions:
+   cl_khr_fp64
+   cl_amd_fp64
+   cl_khr_global_int32_base_atomics
+   cl_khr_global_int32_extended_atomics
+   cl_khr_local_int32_base_atomics
+   cl_khr_local_int32_extended_atomics
+   cl_khr_int64_base_atomics
+   cl_khr_int64_extended_atomics
+   cl_khr_3d_image_writes
+   cl_khr_byte_addressable_store
+   cl_khr_gl_sharing
+   cl_ext_device_fission
+   cl_amd_device_attribute_query
+   cl_amd_vec3
+   cl_amd_printf
+   cl_amd_media_ops
+   cl_amd_media_ops2
+   cl_amd_popcnt
+   cl_khr_d3d10_sharing
+   cl_khr_spir
+   cl_khr_gl_event
+\end{codebox}
+
+原书clinfo信息
+
+\begin{codebox}[text]
+Number of platforms:                             1
+  Platform Profile:                              FULL_PROFILE
+  Platform Version:                              OpenCL 2.0 AMD-APP (1642.5)
+  Platform Name:                                 AMD Accelerated Parallel Processing
+  Platform Vendor:                               Advanced Micro Devices, Inc.
+  Platform Extensions:
+   cl_khr_icd
+   cl_khr_d3d10_sharing
+   cl_khr_icd
+   cl_amd_event_callback
+   cl_amd_offline_devices
+  Platform Name:                                 AMD Accelerated Parallel Processing
+Number of devices:                               2
+  Vendor ID:                                     1002h
+  Device Type:                                   CL_DEVICE_TYPE_GPU
+  Board name:                                    AMD Radeon R9 200 Series
+  Device Topology:                               PCI[B#1, D#0, F#0]
+  Max compute units:                             40
+  Max work group size:                           256
+  Native vector width int:                       1
+  Max clock frequency:                           1000Mhz
+  Max memory allocation:                         2505572352
+  Image support:                                 Yes
+  Max image 3D width:                            2048
+  Cache line size:                               64
+  Global memory size:                            3901751296
+  Platform ID:                                   0x7f54fb22cfd0
+  Name:                                          Hawaii
+  Vendor:                                        Advanced Micro Devices, Inc.
+  Device OpenCL C version:                       OpenCL C 2.0
+  Driver version:                                1642.5(VM)
+  Profile:                                       FULL_PROFILE
+  Version:                                       OpenCL 2.0 AMD-APP (1642.5)
+  Extensions:
+   cl_khr_fp64_cl_amd_fp64
+   cl_khr_global_int32_base_atomics
+   cl_khr_global_int32_extended_atomics
+   cl_khr_local_int32_base_atomics
+
+  Device Type:                                   CL_DEVICE_TYPE_CPU
+  Vendor ID:                                     1002h
+  Board name:
+  Max compute units:                             8
+  Max work items dimensions:                     3
+    Max work items[0]:                           1024
+    Max work items[1]:                           1024
+  Name:                                          AMD FX(tm)-8120 Eight-Core Processor
+  Vendor:                                        AuthenticAMD
+  Device OpenCL C version:                       OpenCL C 1.2
+  Driver version:                                1642.5(sse2, avx, fma4)
+  Profile:                                       FULL_PROFILE
+  Version:                                       OpenCL 1.2 (Build 10094)
+\end{codebox}
+
+图3.2 通过clinfo程序输出一些OpenCL平台和设备信息。我们能看到AMD平台上有两个设备(一个CPU和一个GPU)。这些信息都能通过平台API查询到。
+
+
+
+% ---- 3.3-chinese.md ----
+\section{OpenCL执行模型}
+
+OpenCL执行模型允许我们建立一个拓扑系统来协调主处理器和其他能够执行OpenCL 内核的设备。为了让内核执行在设备上，还需要对OpenCL上下文进行设置，进而传递执行命令和数据到设备端。
+
+\subsection{上下文}
+
+OpenCL中上下文为了内核的正确执行，进行协调和内存管理。上下文是为了协调主机和设备端的交互，管理设备端可用的内存对象，并持续跟踪在设备上创建出来的程序对象和内核对象。上下文对象可以通过OpenCL API\texttt{clCreateContext()}进行创建。
+
+\begin{codebox}[cpp]
+cl_context
+clCreateContext(
+  const cl_context_properties *properties,
+  cl_uint num_devices,
+  const cl_device_id *devices,
+  void (CL_CALL_BACK *pfn_notify)(
+    const char *errinfo,
+    const void *private_info,
+    size_t cb,
+    void *user_data),
+  void *user_data,
+  cl_int *errcode_ret)
+\end{codebox}
+
+\texttt{properties}参数用于限制上下文作用的范围。这个参数可由特定的平台提供，其能够使能与图像的互用性，或使能其他能力。通过限制给定平台的上下文，允许编程者使用多个平台创建的不同的上下文，并且能在一个平台中混用多个供应商提供的设备。另外，创建上下文时必须要使用设备对象，并且编程者可以设置一个用户回调函数，还可以额外传递一个错误码(需要在错误码对象的生命周期内)用于获取API运行的状态。
+
+OpenCL提供了另一个API也能用来创建上下文，其能使用设备列表来创建上下文。通过\texttt{clCreateContextFromType()}可以使用所有的设备类型(CPU、GPU和ALL)创建上下文。创建上下文之后，可以通过使用\texttt{clGetContextInfo()}来查询上下文中设备的数量，以及具体的设备对象。OpenCL中可使用上下文查询指定平台对象和设备对象，通过以上的步骤即可创建上下文，这些步骤也可用于任意OpenCL程序。
+
+\subsection{命令队列}
+
+执行模型是指设备端执行的任务，是基于主机端发送的命令。命令指定的行为包括执行内核，进行数据传递和执行同步。某些设备也能自发一些命令，这种设备以及方式，我们在后面的章节中再进行讨论。
+
+命令队列作为一种通信机制，可以让host发请求到对应的device。当host需要device执行任务的时候，就需要一个命令队列。命令队列需要在每个设备上都进行创建，并且命令队列要在上下文的基础上进行创建。host需要将一条命令提交到对应的命令队列中，因为命令队列不是以分发的形式，而是以指定的形式，所以如果平台上有多个设备时，就需要每个设备上创建一个命令队列。OpenCL中\texttt{clCreateCommandQueueWithProperties()}就是用来创建命令队列，且将命令队列与一个device进行关联。
+
+\begin{codebox}[cpp]
+cl_command_queue
+clCreateCommandQueueWithProperties(
+  cl_context context,
+  cl_device_id device,
+  cl_command_queue_properties peoperties,
+  cl_int *errcode_ret)
+\end{codebox}
+
+\texttt{peoperties}参数是由一个位域值组成，其可使能命令性能分析功能(CL\_\allowbreak{}QUEUE\_\allowbreak{}PROFILING\_\allowbreak{}ENABLE)，以及/或允许命令乱序执行(CL\_\allowbreak{}QUEUE\_\allowbreak{}OUT\_\allowbreak{}OF\_\allowbreak{}DRDER\_\allowbreak{}EXEC\_\allowbreak{}MODE\_\allowbreak{}ENABLE)。这两个功能将在第5章详细讨论。
+
+对于顺序命令队列(默认创建)，会将命令顺序的推入对应的队列中。乱序命令队列允许OpenCL实现不按入队顺序执行对应的命令，这样的执行方式在某种情况下更为高效。如果使用乱序命令队列，其会根据用户指定的依赖关系，按正确的命令依赖顺序进行执行。
+
+任何以\texttt{clEnqueue}开头的OpenCL API都能向命令队列提交一个命令，并且这些API都需要一个命令队列对象作为输入参数。例如，\texttt{clEnqueueReadBuffer()}将device上的数据传递到host，\texttt{clEnqueueNDRangeKernel()}申请一个内核在对应device执行。如何调用这些API将在后续的章节中进行讨论。
+
+除了向命令队列提交命令的API，OpenCL还包括执行栅栏操作API，这种操作可以用来同步命令队列。\texttt{clFlush()}和\texttt{clFinish()}这两个API都能对命令队列进行栅栏操作。其中，\texttt{clFinish()}的调用将会阻塞host上的执行线程，直到命令队列上的所有命令执行完毕，其功能就是和同步栅栏操作一样。\texttt{clFlush()}将会阻塞host上的执行线程，直到命令队列上的命令都从队列上移出。移出命令队列后的命令，就已经提交到device端，不过不一定完全执行完成。这两个API都需要一个命令队列作为参数。
+
+\begin{codebox}[cpp]
+cl_int clFlush(cl_command_queue command_queue);
+cl_int clFinish(cl_command_queue command_queue);
+\end{codebox}
+
+\subsection{事件}
+
+OpenCL API中，用来指定命令之间依赖关系的对象称为事件(event)，所有的\texttt{clEnqueue}开头的API，均有三个共同的参数：事件链表的指针，其指定了当前命令依赖的事件列表，等待列表的长度，以及表示当前命令执行的事件指针，这个指针用于依赖该命令的其他命令。使用事件来指定依赖关系的方式将在第5章介绍。
+
+除了能提供命令依赖顺序，还能通过事件对命令执行的状态随时进行查询。当事件所对应的命令处以执行状态时，其状态就会发生变化。命令状态一共有以下6中：
+
+\begin{itemize}
+\item \textbf{Queued}：命令处于命令队列中。
+\item \textbf{Submitted}：命令从命令队列中移除，已经提交到设备端执行。
+\item \textbf{Ready}：命令已经准备好在设备上执行。
+\item \textbf{Running}：命令正在设备上执行。
+\item \textbf{Ended}：命令已经在设备上执行完成。
+\item \textbf{Complete}：所有命令以及其子命令都执行完成。
+\end{itemize}
+
+子命令与设备端入队有关，我们会在下一节进行讨论。当命令成功的执行完成，事件的状态将会被设置为\texttt{CL\_COMPLETE}。如果命令非正常终止，事件的状态将会为一个负数值。这种情况下，有非正常终止的命令队列，以及其他在同一上下文上创建的命令队列，都将不能正常使用或运行。查询事件所使用的API为\texttt{clGetEventInfo()}。
+
+除了记录了不同入队命令间的依赖关系，OpenCL也提供了用于和host同步的API\texttt{clWaitForEvents()}，该API阻塞host的执行线程，等待指定事件队列上的所有命令执行完毕。
+
+\begin{codebox}[cpp]
+cl_int
+clWaitForEvents(
+  cl_uint num_events,
+  const cl_event *event_list)
+\end{codebox}
+
+\subsection{设备端入队}
+
+目前为止，我们所描述的执行模型是依据“老板-职员”式例来说的，host(老板)向device(职员)发送命令。这样的模型提供了一种简单的主从合作模式。不过，在很多情况下任务的分发并不能静态确定——尤其是算法的下一个阶段要依赖上一个阶段的结果。例如，在组合优化的应用中，查询范围的大小决定着工作组的数量，不过，范围大小只有在上一次迭代的时候才能知道。之前版本的OpenCL，处理这种情况通常是使用一个新的内核对象来执行下一阶段的任务。为了满足这个需求，以及提升性能，OpenCL 2.0为执行模型添加了一项新的特性——设备端入队。
+
+执行中的内核现在可以让另外一个内核进入命令队列中(具体可以看图3.5)。这种情况下，正在执行的内核可以称为“父内核”，刚入队的内核称为“子内核”。虽然，父子内核是以异步的方式执行，但是父内核需要在子内核全部结束后才能结束。我们可通过与父内核关联的事件对象来对执行状态进行查询，当事件对象的状态为CL\_\allowbreak{}COMPLETE时，就代表父内核结束执行。设备端的命令队列是无序命令队列，其具有无序命令队列的所有特性。设备端命令会进入到设备端产生的命令队列中，并且使用事件的方式来存储各个命令间的依赖关系。这些事件对象只有执行在设备端的父内核可见。更多有关设备端入队的内容，将会在第5章进行讨论。
+
+
+
+% ---- 3.4-chinese.md ----
+\section{内核和OpenCL编程模型}
+
+执行模型API能让应用管理OpenCL命令的执行。OpenCL命令通过数据转移和内核执行，对具体应用数据进行处理，从而执行一些有意义的任务。OpenCL内核也属于OpenCL应用中的一部分，并且这一部分实实在在的执行在设备上。与CPU并发模型类似，OpenCL内核在语法上类似于标准的C函数，不同之初在于添加了一些关键字，OpenCL的并发模型由内核实现构成。使用系统多线程API或OpenMP，开发一款执行在CPU上的并发应用时，开发者会考虑物理设备上有多少线程可以使用(比如：CPU核数)，如果使用的线程数量超过了可用的线程数，那么在物理线程不够用的基础上，多个线程会在不同时刻互相切换执行。OpenCL在的编程上，通常是以最细粒度的并行。OpenCL的一般性体现在，接口的通用性和底层内核直接映射物理资源。接下来展示三个不同版本的向量加法：①串行C实现，②多线程C实现，③OpenCL C实现。代码3.1中使用串行的方式实现向量加法(C语言)，其使用一个循环对每个元素进行计算。每次循环将两个输入数组对应位置的数相加，然后存储在输出数组中。图3.3展示了向量加法的算法。
+
+\begin{codebox}[cpp]
+// Perform an element-wise addition of A and B and store in C.
+// There are N elements per array.
+
+void vecadd(int *C, int *A, int *B, int N){
+  for (int i = 0; i < N; ++i){
+    C[i] = A[i] + B[i];
+  }
+}
+\end{codebox}
+
+代码3.1 串行加法实现
+
+\myGraphic{0.92}{images/chapter3/3-3.png}{图3.3 向量加法的算法表示，其中每个元素可以单独进行加的操作}
+
+对于一个多核设备，我们要不就使用底层粗粒度线程API(比如，Win32或POSIX线程)，要不就使用数据并行方式(比如，OpenMP)。粗粒度多线程需要对任务进行划分(循环次数)。因为循环的迭代次数特别多，并且每次迭代的任务量很少，这时我们就需要增大循环迭代的粒度，这种技术叫做“条带处理”[1]。多线程版的代码如代码3.2所示。
+
+\begin{codebox}[cpp]
+// Perform an element-wise addition of A and B and store in C.
+// There are N elements per array and NP CPU cores.
+
+void vecadd(int *C, int *A, int *B, int N, int NP, int tid){
+
+  int ept = N / NP; // 每个线程所要处理的元素个数
+
+  for (int i = tid * ept; i < (tid + 1) * ept; ++i){
+    C[i] = A[i] + B[i];
+  }
+}
+\end{codebox}
+
+代码3.2 分块处理向量加法，使用粗粒度多线程(例如，使用POSIX CPU线程)。输入向量上的不同元素被分配到不同的核上。
+
+OpenCL C上的并发执行单元称为工作项(\emph{work-item})。每一个工作项都会执行内核函数体。这里就不用手动的去划分任务，这里将每一次循环操作映射到一个工作项中。OpenCL运行时可以创建很多工作项，其个数可以和输入输出数组的长度相对应，并且工作项在运行时，以一种默认合适的方式映射到底层硬件上(CPU或GPU核)。概念上，这种方式与并行机制中原有的功能性“映射”操作(可参考mapReduce)和OpenMP中对for循环进行数据并行类似。当OpenCL设备开始执行内核，OpenCL C中提供的内置函数可以让工作项知道自己的编号。下面的代码中，编程者调用\texttt{get\_global\_id(0)}来获取当前工作项的位置，以及访问到的数据位于数组中的位置。\texttt{get\_global\_id()}的参数用于获取指定维度上的工作项编号，其中“0”这个参数，可获取当前第一维上工作项的ID信息。
+
+\begin{codebox}[cpp]
+// Perform an element-wise addition of A and B and store in C.
+// N work-items will be created to execute this kernel.
+__kernel
+void vecadd(__global int *C, __global int *A, __global int *B){
+  int tid = get_global_id(0); // OpenCL intrinsic函数
+  c[tid] = A[tid] + B[tid];
+}
+\end{codebox}
+
+代码3.3 OpenCL版向量相加内核
+
+OpenCL上运行的都是细粒度工作项，如果硬件支持分配细粒度线程，就可以在当前架构下产生海量的工作项(细粒度线程的可扩展性更强)。OpenCL使用的层级并发模型能保证，即使能够创建海量工作项的情况下，依旧可以正常的运行。当要执行一个内核时，编程者需要指定每个维度上工作项的数量(NDRange)。一个NDRange可以是一维、二维、三维的，其不同维度上的工作项ID映射的是相应的输入或输出数据。NDRange的每个维度的工作项数量由\texttt{size\_t}类型指定。
+
+向量相加的例子中，我们的数据是一维的，先假设有1024个元素，那么需要创建一个数组，里面记录三个维度上的工作项数量。host代码需要为1023个元素指定一个一维NDRange。下方的代码，就是如何指定各维度上的工作项数量：
+
+\begin{codebox}[cpp]
+size_t indexSpace[3] = {1024, 1, 1};
+\end{codebox}
+
+为了增加NDRange的可扩展性，需要将工作项继续的划分成更细粒度的线程，那么需要再被划分的工作项就称为工作组(\emph{work-group})(参考图3.4)。与工作项类似，工作组也需要从三个维度上进行指定，每个维度上的工作项有多少个。在同一个工作组中的工作项具有一些特殊的关系：一个工作组中的工作项可以进行同步，并且他们可以访问同一块共享内存。工作组的大小在每次分配前就已经固定，所以对于更大规模的任务分配时，同一工作组中的工作项间交互不会增加性能开销。实际上，工作项之间的交互开销与分发的工作组的大小并没有什么关系，这样就能保证在更大的任务分发时，OpenCL程序依旧能保证良好的扩展性。
+
+\myGraphic{0.92}{images/chapter3/3-4.png}{图3.4 层级模型用于产生在NDRange时所使用的工作项，以及工作项所在的工作组}
+
+向量相加的例子中，可以参考以下方式指定工作组的大小：
+
+\begin{codebox}[cpp]
+size_t workgroupSize[3] = {64, 1, 1};
+\end{codebox}
+
+如果每个数组的工作项总数为1024，那么就会创建16个工作组(1024工作项/(64工作项每工作组)=16工作组)。为了保证硬件工作效率，工作组的大小通常都是固定的。之前的OpenCL标准中，每个维度上的工作项数目必须是工作组数目的倍数。这样的话，在内核执行的时候，有时候会有一些用不到的工作项，这些工作项只能直接返回，不做任何输出。不过，在OpenCL 2.0标准中，允许各维度上的工作项和工作组数量不成倍数关系，工作数量被分成两部分：第一部分是编程者指定给工作组的工作项，另一部分是剩余的工作组，这些工作可以没有工作项。当工作项与工作组的关系不成倍数，那么二维的NDRange尺寸就有4种可能，对于三维的NDRange尺寸就有8种可能。
+
+向量相加程序中，每个工作项的行为都是独立的(即使在同一个工作组)，OpenCL允许编程者不去分配工作组的尺寸，其会在实现中进行自动的划分；这样的话，开发者就可以传递NULL作为工作组数组的尺寸。
+
+\subsection{处理编译和参数}
+
+一个OpenCL程序对象汇集了对应的OpenCL C内核，内核调用的函数，以及常量数据。例如，一个代数解决应用中，同一个OpenCL程序对象可能包含一个向量相加内核，一个矩阵相乘的内核和一个矩阵转置的内核。通过一系列运行时API的调用，可以让OpenCL内核源码得到编译。运行时编译能让系统为指定的计算设备，对OpenCL内核进行优化。运行时编译也能让OpenCL内核代码运行在之前不知是否支持OpenCL的设备上。运行时编译就不需要为区分AMD，NVIDIA或Intel平台而进行提前编译，只要计算设备提供OpenCL编译器，那么不需要为这些平台做任何改变。OpenCL的软连接只会在同一运行时层进行，由各个硬件平台提供的可安装客户端驱动(ICD)调用。ICD通常会以动态库的方式提供，不同的ICD代表着不同的供应商提供的运行时实现，可以通过动态库的接口激活对应的平台。
+
+使用源码创建内核的步骤如下：
+
+\begin{enumerate}
+\item 将OpenCL C源码存放在一个字符数组中。如果源码以文件的形式存放在硬盘上，那么需要将其读入内存中，并且存储到一个字符数组中。
+\item 调用\texttt{clCreateProgramWithSource()}通过源码可以创建一个\texttt{cl\_program}类型对象。
+\item 创建好的程序对象需要进行编译，编译之后的内核才能在一个或多个OpenCL设备上运行。调用\texttt{clBuildProgram()}完成对内核的编译，如果编译有问题，该API会将输出错误信息。
+\item 之后，需要创建\texttt{cl\_kernel}类型的内核对象。调用\texttt{clCreateKernel()}，并指定对应的程序对象和内核函数名，从而创建内核对象。
+\end{enumerate}
+
+第4步就是为了获得一个\texttt{cl\_kernel}对象，有点像从一个动态库上输出一个函数。程序对象在编译时，会将内核函数进行接口输出，其函数名为其真正的入口。将内核函数名和程序对象传入\texttt{clCreateKernel()}，如果程序对象是合法的，并且这个函数名是存在的，那么久会返回一个内核对象。OpenCL程序对象与内核对象的关系，如图3.5所示，一个程序对象上可以提取多个内核对象。每个OpenCL上下文上可有多个OpenCL程序对象，这些程序对象可由OpenCL源码创建。
+
+\begin{codebox}[cpp]
+cl_kerenl
+clCreateKernel(
+  cl_program program,
+  const char *kernel_name,
+  cl_int *errcode_ret)
+\end{codebox}
+
+一个内核对象的二进制表示是由供应商指定。AMD运行时上，有两大主要的设备：x86 CPU和GPU。对于x86 CPU，\texttt{clBuildProgram()}生成x86内置代码，这份代码可以直接在设备上执行。对于GPU，\texttt{clBuildProgram()}将创建AMD GPU的中间码，高端的中间码将会在指定的GPU架构上即时编译生成，其产生的通常是一份已知的指令集架构的代码。NVIDIA使用同样的方式，不过NVIDIA这种中间码为并行线程执行(PTX，parallel thread execute)。这样做的好处是，如果一个设备上的GPU指令集有所变化，其产生的代码功能依旧不会受到影响。这种产生中间代码的方式，能给编译器的开发带来更大的发展空间。
+
+\myGraphic{0.92}{images/chapter3/3-5.png}{图3.5 这个OpenCL运行时图展示了一个OpenCL上下文对象内具有两个计算设备(一个CPU设备和一个GPU设备)。每个计算设备具有自己的命令队列。主机端和设备端的命令队列在图中都由所展示。设备端的队列只能被在设备上执行的内核对象看到。内存对象通过内存模型定义。}
+
+OpenCL程序对象另一个特性是能在构建之后，产生二进制格式的文件，并写入到硬盘。如同大多数对象一样，OpenCL提供一个函数可以返回一些关于程序对象的信息——\texttt{clGetProgramInfo()}。这个函数中其中有一个参数可以传\texttt{CL\_PROGRAM\_BINARIES}，这个参数可以返回供应商指定的二进制程序对象(通过\texttt{clBuildProgram()}编译之后)。除了\texttt{clCreateProgramWithSource()}外，OpenCL也提供\texttt{clCreateProgramWithBinary()}，这个函数可以通过一系列编译好的二进制文件直接创建程序对象，对应的二进制文件可以通过\texttt{clGetProgramInfo()}得到。使用二进制表示的OpenCL内核，因为不需要以源码的方式存储，以及安装编译器，这种方式更容易部署OpenCL程序。
+
+与调用C函数不同，我们不能直接将参数赋予内核函数的参数列表中。执行一个内核需要通过一个入队函数进行发布。由于核内的语法为C，且内核参数具有持续性(如果我们只改变参数里面的值，就没有必要再重新进行赋值)。OpenCL中提供\texttt{clSetKernelArg()}对内核的参数进行设置。这个API需要传入一个内核对象，指定参数的索引值，参数类型的大小，以及对应参数的指针。内核参数列表中的类型信息，需要一个个的传入内核中。
+
+\begin{codebox}[cpp]
+cl_int
+clSetKernelArg(
+  cl_kernel kernel,
+  cl_uint arg_index,
+  size_t arg_size,
+  const void *arg_value)
+\end{codebox}
+
+\subsection{执行内核}
+
+调用\texttt{clEnqueueNDRangeKernel()}会入队一个命令道命令队列中，其是内核执行的开始。命令队列被目标设备指定。内核对象标识了哪些代码需要执行。内核执行时，有四个地方与工作项创建有关。\texttt{work\_dim}参数指定了创建工作项的维度(一维，二维，三维)。\texttt{global\_work\_size}参数指定NDRange在每个维度上有多少个工作项，\texttt{local\_work\_size}参数指定WorkGroup在每个维度上有多少个工作组。\texttt{global\_work\_offset}参数可以指定全局工作组中的ID是否从0开始计算。
+
+\begin{codebox}[cpp]
+cl_int
+clEnqueueNDRangeKernel(
+  cl_command_queue command_queue,
+  cl_kernel kernel,
+  cl_uint work_dim,
+  const size_t *global_work_offset,
+  const size_t *global_work_size,
+  const size_t *local_work_size,
+  cl_uint num_events_in_wait_list,
+  const cl_event *event_wait_list,
+  cl_event *event)
+\end{codebox}
+
+和所有\texttt{clEnqueue}API相同，需要提供一个event\_\allowbreak{}wait\_\allowbreak{}list，当这个参数不为NULL时，当前的内核要等到等待列表中的所有任务都完成才能执行。该API也是异步的：命令入队之后，函数会立即返回(通常会在内核执行之前就返回)。OpenCL中\texttt{clWaitForEvents()}和\texttt{clFinish()}可以在host端阻塞等待，直到对应的内核对象执行完成。
+
+
+
+% ---- 3.5-chinese.md ----
+\section{OpenCL内存模型}
+
+内存与计算平台之间有比较大的差异。为了可移植性，OpenCL定义一个抽象的内存模型，其目的是为了能让编程者写出的代码对应到供应商所提供的实际硬件内存上。内存模型描述了，平台为了OpenCL程序所外现的内存(系统)结构。内存模型需要定义，如何让执行单元看到对应值的方式。内存模型是保证OpenCL程序正确性的关键。
+
+内存模型可以实现编程者所期望的功能，对应内存操作能保证其发生的顺序，以及内存中实际的数值(当读取操作返回时)。OpenCL内存一致性模型基于ISO C11编程语言的内存模型。第6章和第7章会详细讨论内存模型的内存，包括一致性内存模型和共享虚拟内存。我们只需要了解一下OpenCL中定义的不同内存类型，其中内存区域是对抽象内存模型的补足。了解了这些之后，我们就可以开始第一个OpenCL程序了。
+
+\subsection{内存对象}
+
+OpenCL内核通常需要对输入和输出数据进行分类(例如，数组或多维矩阵)。程序执行前，需要保证输入数据能够在设备端访问到。为了将数据转移到设备端，首先做的事就是封装出一个内存对象。为了产生输出数据，需要开辟相应大小的空间，以及将开辟的空间封装成一个内存对象。OpenCL定义了三种内存类型：数组、图像和管道。
+
+\textbf{数组缓存}
+
+\emph{Buffer}类型类似于C语言中的数据(使用malloc函数开辟)，这种类型中数据在内存上是连续的。理论上，这种类型可以在设备端以指针的方式使用。OpenCL API \texttt{clCreateBuffer()}为这种类型分配内存，并返回一个内存对象。
+
+\begin{codebox}[cpp]
+cl_mem
+clCreateBuffer(
+  cl_context context,
+  cl_mem_flags flags,
+  size_t size,
+  void *host_ptr,
+  cl_int *errcode_ret)
+\end{codebox}
+
+该API类似于C中malloc()函数，或C++中的new操作。创建一个数组需要知道其长度和创建在哪一个上下文对象上；创建之后，与该上下文对象相关联的设备就能看到这个内存对象。对于第二个标识参数，是用来指定设备端可对内存进行的操作，可以是“只读”、“只写”或“读写”。其他标识需要在数组创建的时候指定。比较简单的选项是使用主机端的指针来初始化一段数组。我们能看到的是OpenCL数组是与上下文对象进行关联，而非某个设备，所以数据转移的是在运行时确定的。数组转移到指定的设备上，或是从指定的设备转移到其他地方，都由OpenCL运行时根据数据的依赖性进行管理。
+
+\textbf{图像对象}
+
+图像也是OpenCL内存对象，其抽象了物理数据的存储，以便“设备指定”的访存优化。与数组不同，图像数组数据不能直接访问。因为相邻的数据并不保证在内存上连续存储。使用图像的目的就是为了发挥硬件空间局部性的优势，并且可以利用设备硬件加速的能力。
+
+\begin{codebox}[cpp]
+cl_mem
+clCreateImage(
+  cl_context context,
+  cl_mem_flags flags,
+  const cl_image_format *image_format,
+  const cl_image_desc *image_desc,
+  void *host_ptr,
+  cl_int *errcode_ret)
+\end{codebox}
+
+图像没有数据类型或维度，图像对象的创建需要通过描述符，让硬件了解这段内存数据的具体信息。图像对象中的每个元素通过格式描述符来表示(cl\_\allowbreak{}image\_\allowbreak{}format)。格式描述符用于描述图像元素在内存上是如何存储，以及使用通道的信息。\emph{通道序}(channel order)指的是由多少个通道元素组成一个图像元素(例如，RGBA就是由四个通道值组成一个像素，其通道序为4)，并且\emph{通道类型}(channel type)指定了每个元素的大小。大小可以设置为1到4字节中的任意值，这样就能表现多种不同的格式(从整型到浮点)。其他数据元通过图像描述符(cl\_\allowbreak{}image\_\allowbreak{}desc)提供，其包括了图像的类型和维度。第4章我们会看到一个使用图像的例子。第6章和第7章，我们将详细的讨论图像的架构设计和评估。
+
+为了支持图像类型，在设备端OpenCL C专门提供了用于读写图像数据的内置函数。硬件供应商可以通过这些函数，在底层单独对图像访问进行优化，或者利用硬件加速功能提高图像访存的速度。与数组相比，图像读写函数需要额外的参数，并且这些函数根据图像的具体数据类型进行使用。例如，\texttt{read\_imagef()}函数就适用于读取浮点型的数值，\texttt{read\_imageui()}函数就使用与读取无符号整型的数值。这些函数在使用的数据类型上有些不同，但在读取方面至少需要有一组访问坐标和一个采样器对象。采样器可以指定，设备访问到图像外部时，这些不存在的数据应该如何获取，是否使用差值，以及是否对坐标进行归一化。写入图像需要手动将数据转换成对应的存储数据格式(例如，对应的通道和对应的数据大小)，目的坐标也需要手动的进行转换。
+
+之前的OpenCL标准中，内核不允许对一个图像对象同时进行写入和读取。不过，OpenCL 2.0放松了这一要求，其提供的一系列同步操作，能让编程者安全的在同一内核中对同一图像对象进行读和写。
+
+\textbf{管道对象}
+
+管道内存对象就是一个数据元素(被称为\emph{packets})队列，其和其他队列一样，遵循FIFO(先进先出)的方式。一个管道对象具有一个写入末尾点，用于表示元素由这里插入；并且，有一个读取末尾点，用于表示元素由这里移除。要创建一个管道对象时，需要调用OpenCL API \texttt{clCreatePipe()}，这里需要提供包的大小和管道中可容纳包的最大数量(例如，创建时固定了管道中可容纳包的最大值)。函数\texttt{clGetPipeInfo()}可以返回管道中包的大小和整体大小(也就是可容纳包的最大值)。属性参数是一个保留参数，在OpenCL 2.0阶段，这个值只能传NULL。
+
+\begin{codebox}[cpp]
+cl_mem
+clCreatePipe(
+  cl_context context,
+  cl_mem_flags flags,
+  cl_uint pipe_packet_size,
+  cl_uint pipe_max_packets,
+  const cl_pipe_properties *properties,
+  cl_int *errcode_ret)
+\end{codebox}
+
+任意时间点，只能有一个内核向管道中存入包，并且只有一个内核从管道中读取包。为了支持“生产者-消费者”设计模式，一个内核与写入末尾点连接(生产者)，同时另一个内核与读取末尾点连接(消费者)。同一个内核不能同时对一个管道进行读取和存入。
+
+图像和管道都是不透明的数据结构，其只能通过OpenCL C的内置函数进行访问(比如，\texttt{read\_pipe()}和\texttt{write\_pipe()})。OpenCL C也提供相应的函数，可以保留管道的读取点和写入点。内置函数允许管道在工作组级别上进行访问，而不需要单独访问每个工作项，并且能在工作组级别上执行同步。第6章将会对管道进行更多的讨论。
+
+\subsection{数据转移命令}
+
+内核执行之前，通常需要将主机端的数据拷贝到OpenCL内存对象的所分配的空间中。创建数组或图像可以调用不同的创建API(\texttt{clCreate*()})。将主机指针作为\texttt{clCreate*()}的参数用于初始化OpenCL内存对象。这种方式可以隐式的进行数据传输，并不需要编程者为之担心。内存对象初始化之后，运行时就需要保证数据依据依赖关系，以正确的顺序和时间转移到设备端。
+
+虽然，数据转移交给运行时进行管理，但是我们通常出于对性能的考虑(将在第6章进行讨论)，常常希望能够手动进行数据传输。显式的数据传输也需要检索主机端的内存空间。因此，通常情况下使用显式数据传输命令，在内存对象被内核调用之前，为其写入相应的数据到设备端；以及，在内存对象最后一次使用之后，读取其数据到主机端。假设我们的内存对象是一个数组，主机端和设备端的内存互传需要使用到下面两个API：\texttt{clEnqueueWriteBuffer()}和\texttt{clEnqueueReadBuffer()}。设备端使用的内存与主机内存通常是离散的，当命令执行时，数据可能就已经传输到设备端了(比如，使用PCIe总线)。读取和写入内存对象的API十分相似。\texttt{clEnqueueWriteBuffer()}的参数列表如下所示：
+
+\begin{codebox}[cpp]
+cl_int
+clEnqueueWriteBuffer(
+  cl_command_queue command_queue,
+  cl_mem buffer,
+  cl_bool blocking_write,
+  size_t offset,
+  size_t cb,
+  const void *ptr,
+  cl_uint num_events_in_wait_list,
+  const cl_event *event_wait_list,
+  cl_event *event)
+\end{codebox}
+
+除了命令队列，该函数还需要数组型的内存对象，所要传输的数据大小，以及数组的偏移。偏移量和传输数据可以将原始数据的一个子集进行传输。如果需要数据传输完成再返回，blocking\_\allowbreak{}write参数可以设置成CL\_\allowbreak{}TRUE；如果设置成CL\_\allowbreak{}FALSE，则以更加高效的异步方式进行传输，且函数会立即返回，无需等到数据完全传输完再返回。写入和读取数组的操作将在本章最后的例子中演示。
+
+\subsection{内存区域}
+
+OpenCL将内存划分成主机内存和设备内存。主机内存可在主机上使用，其并不在OpenCL的定义范围内。使用对应的OpenCL API可以进行主机和设备的数据传输，或者通过共享虚拟内存接口进行内存共享。而设备内存，指定是能在执行内核中使用的内存空间。
+
+OpenCL将设备内存分成了四种，这四种内存分别代表了不同的内存区域，如图3.6所示。
+
+\myGraphic{0.92}{images/chapter3/3-6.png}{图3.6 内存区域和其在OpenCL内存模型中的界限}
+
+这些内存空间都与OpenCL内核有关。一个内核中，不同区域对应有不同的关键字，关键字用来指定变量使用哪种内存进行创建，或数据具体所存储的位置。内存区域在逻辑上是不相交的，并且不同区域的数据要被其他区域使用，是否需要进行数据转移是由内核开发者来控制。每个内存区域都有其各自的性能特性。由于性能特性的缘故，存储到不同区域的数据在读取时具有很大的性能差异。
+
+下面简单的来描述一下每个内存区域：
+
+\begin{itemize}
+\item 全局内存对于执行内核中的每个工作项都是可见的(类似于CPU上的内存)。当数据从主机端传输到设备端，数据就存储在全局内存中。有数据需要从设备端传回到主机端，那么对应的数据需要存储在全局内存中。其关键字为\texttt{global}或\texttt{\_\_global}，关键字加在指针类型描述符的前面，用来表示该指针指向的数据存储在全局内存中。例如，本章最后的的例子中，OpenCL C代码中\texttt{global int *A}代表A指针指向的数据为与全局内存中(虽然我们会看到的A实际位于私有内存中)。
+\item 常量内存并非为只读数据设计，但其能让所有工作项同时对该数据进行访问。这里存储的值通常不会变化(比如，某个数据变量存储着π的值)。OpenCL的内存模型中，常量内存为全局内存的子集，所以内存对象传输到全局内存的数据可以指定为“常量”。使用关键字\texttt{constant}或\texttt{\_\_constant}将相应的数据映射到常量内存。
+\item 局部内存中的数据，只有在同一工作组内的工作项可以共享。通常情况下，局部内存会映射到片上的物理内存，例如：软件管理的暂存式存储器。比起全局内存，局部内存具有更短的访问延迟，以及更高的传输带宽。调用\texttt{clSetKernelArg()}设置局部内存时，只需要传递大小，而无需传递对应的指针，相应的局部内存会由运行时进行开辟。OpenCL内核中，使用\texttt{local}或\texttt{\_\_local}关键字来描述指针，从而来定义局部内存(例如，\texttt{local int *sharedData})。不过，数据也可以通过关键字\texttt{local}，静态申明成局部内存变量(例如，\texttt{local int[64]})。
+\item 私有内存只能由工作项自己进行访问。局部变量和非指针内核参数通常都在私有内存上开辟。实践中，私有变量通常都与寄存器对应。不过，当寄存器不够私有数组使用是，这些溢出的数据通常会存储到非片上内存(高延迟的内存空间)上。
+\end{itemize}
+
+\myGraphic{0.92}{images/chapter3/3-7.png}{图3.7 AMD Radeon HD 7970 GPU具体硬件存储器与OpenCL内存模型的对应关系}
+
+\subsection{通用地址空间}
+
+之前的OpenCL标准中，如果使用不同内存区域内存，需要在创建的时候使用对应的关键字对指针进行申明。为了不让编程者的精力在这些方便分散，“通用地址空间”概念添加入OpenCL 2.0标准。“通用地址空间”的建模，更加贴近已经使用很久的嵌入式C标准(IOS/IEC 9899:1999)。通用地址空间支持指向私有、局部和全局地址指针的互相转换，这样编程者只需要写一个简单的函数即可，其指针参数可以接受这指向这三种内存区域的指针。关于通用地址空间将在第7章详细讨论。
+
+
+
+% ---- 3.6-chinese.md ----
+\section{OpenCL运行时(例子)}
+
+OpenCL的四种模型在之前的章节中已经全部讨论了，OpenCL通过运行时API让应用开发者了解这些模型。平台模型用来使能一个主机，以及一个或多个设备，让其参与到OpenCL应用的执行中。应用开发者使用编程模型来让OpenCL内核实现其核心计算部分。内核执行时如何获取需要的数据，则有内存模型定义。开发者通过执行模型提交相应的命令到设备端(执行内存搬运或执行内核任务)。本节会将这些内容融合到一个完整的OpenCL应用中。
+
+创建并执行一个简单的OpenCL应用大致需要以下几步：
+
+\begin{enumerate}
+\item 查询平台和设备信息
+\item 创建一个上下文
+\item 为每个设备创建一个命令队列
+\item 创建一个内存对象(数组)用于存储数据
+\item 拷贝输入数据到设备端
+\item 使用OpenCL C代码创建并编译出一个程序
+\item 从编译好的OpenCL程序中提取内核
+\item 执行内核
+\item 拷贝输出数据到主机端
+\item 释放资源
+\end{enumerate}
+
+下面的代码将具体实现以上总结的每一步。OpenCL应用中，大部分的通用代码对OpenCL的执行进行设置，这样就允许跨硬件平台(不同的供应商)架构来执行OpenCL内核。因此，其中的大部分代码可以直接在其他的应用中直接使用，并且可以抽象成用户定义函数。之后的章节，将展示OpenCL C++ API，其冗余要小于C API。
+
+现在我们来讨论逐个步骤。本节之后，将会提供完整的程序代码。
+
+\textbf{1. 查询平台和设备}
+
+OpenCL内核需要执行在设备端，那么就需要至少一个平台和一个设备可以查询。
+
+\begin{codebox}[cpp]
+cl_int status; // 用于错误检查
+
+// 检索平台的数量
+cl_uint numPlatforms = 0;
+status = clGetPlatformIDs(0, NULL, &numPlatforms);
+
+// 为每个平台对象分配足够的空间
+cl_platform_id *platforms = NULL;
+platforms = (cl_platform_id *)malloc(numPlatforms * sizeof(cl_platform_id));
+
+// 将具体的平台对象填充其中
+status = clGetPlatformIDs(numPlatforms, platforms, NULL);
+
+// 检索设备的数量
+cl_uint numDevices = 0;
+status = clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_ALL, 0, NULL, &numDevices);
+
+// 为每个设备对象分配足够的空间
+cl_device_id *devices;
+devices = (cl_device_id *)malloc(numDevices * sizeof(cl_device_id));
+
+// 将具体的设备对象填充其中
+status = clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_ALL, numDevices, devices, NULL);
+\end{codebox}
+
+之后的完整代码中，我们将默认使用首先找到的平台和设备。这样的源码看起来更加简单明了。
+
+\textbf{2. 创建一个上下文}
+
+找到平台和设备之后，就可以在主机端对上下文进行配置。
+
+\begin{codebox}[cpp]
+// 创建的上下文包含所有找到的设备
+cl_context context = clCreateContext(NULL, numDevices, devices, NULL, NULL, &status);
+\end{codebox}
+
+\textbf{3. 为每个设备创建一个命令队列}
+
+创建完上下文，就要为每个设备创建一个命令队列(每个命令队列只关联其对应的设备)。主机端需要设备端执行的命令将提交到命令队列中，由命令队列管理执行。
+
+\begin{codebox}[cpp]
+// 为第一个发现的设备创建命令队列
+cl_command_queue cmdQueue = clCreateCommandQUeueWithProperties(context, devices[0], 0, &status);
+\end{codebox}
+
+\textbf{4. 创建设备数组用于存储数据}
+
+创建一个数组需要提供其长度，以及与该数组相关的上下文；该数组能对该上下文所有设备可见。通常，调用者需要提供一些标识，来表明数据是可只读、只写或读写。如果第四个参数传NULL，OpenCL将不会在这步对数组进行初始化。
+
+\begin{codebox}[cpp]
+// 向量加法的三个向量，2个输入数组和1个输出数组
+cl_mem bufA = clCreateBuffer(context, CL_MEM_READ_ONLY, datasize, NULL, &status);
+cl_mem bufB = clCreateBuffer(context, CL_MEM_READ_ONLY, datasize, NULL, &status);
+cl_mem bufC = clCreateBuffer(context, CL_MEM_WRITE_ONLY, datasize, NULL, &status);
+\end{codebox}
+
+\textbf{5. 拷贝输入数据到设备端}
+
+下一步就是将主机端指针指向的数组拷贝到设备端。该API需要一个命令队列对象作为参数，所以数据通常都是直接拷贝到设备端。将第三个参数设置为CL\_\allowbreak{}TRUE，我们将等待该API将数据全部拷贝到设备端之后才返回。
+
+\begin{codebox}[cpp]
+// 将输入数据填充到数组中
+status = clEnqueueWriteBuffer(cmdQueue, bufA, CL_TRUE, 0, datasize, A, 0, NULL, NULL);
+status = clEnqueueWriteBuffer(cmdQueue, bufB, CL_TRUE, 0, datasize, B, 0, NULL, NULL);
+\end{codebox}
+
+\textbf{6. 使用OpenCL C代码创建并编译出一个程序}
+
+代码列表3.3中的向量相加内核存储在一个字符数组中，programSource，当可以用来创建程序对象(之后需要编译)。当我们编译一个程序时，我们需要提供目标设备的信息。
+
+\begin{codebox}[cpp]
+// 使用源码创建程序
+cl_program program = clCreateProgramWithSource(context, 1, (const char **)&programSource, NULL, &status);
+
+// 为设备构建(编译)程序
+status = clBuildProgram(program, numDevices, devices, NULL, NULL, NULL);
+\end{codebox}
+
+\textbf{7. 从编译好的OpenCL程序中提取内核}
+
+内核通过提供内核函数名，在程序上进行创建。
+
+\begin{codebox}[cpp]
+// 创建向量相加内核
+cl_kernel kernel = clCreateKernel(program, "vecadd", &status);
+\end{codebox}
+
+\textbf{8. 执行内核}
+
+内核创建完毕，数据都已经传输到设备端，数组需要设置到内核的参数上。之后，一条需要执行内核的命令就进入了命令队列。内核的执行方式需要指定的NDRange进行配置。
+
+\begin{codebox}[cpp]
+// 设置内核参数
+status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufA);
+status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufB);
+status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufC);
+
+// 定义工作项的空间维度和空间大小
+// 虽然工作组的设置不是必须的，不过可以设置一下
+size_t indexSpaceSize[1],workGroupSize[1];
+
+indexSpaceSize[0] = datasize / sizeof(int);
+workGroupSize[0] = 256;
+
+// 通过执行API执行内核
+status = clEnqueueNDRangeKernel(cmdQueue, kernel, 1, NULL, indexSpaceSize, workGroupSize, 0, NULL, NULL);
+\end{codebox}
+
+\textbf{9. 拷贝输出数据到主机端}
+
+\begin{codebox}[cpp]
+// 将输出数组拷贝到主机端内存中
+status = clEnqueueReadBuffer(cmdQueue, bufC, CL_TRUE, 0, datasize, C, 0, NULL, NULL);
+\end{codebox}
+
+\textbf{10. 释放资源}
+
+内核执行完成后，并且输出已经传出到主机端，OpenCL分配的资源需要进行释放。这点和\texttt{C/C++}程序中的内存操作、文件处理以及其他资源的处理，都需要开发者显式释放。OpenCL为不同的对象提供了不同的释放API。OpenCL上下文需要最后释放，因为数组和命令队列都绑定在上下文上。这点与C++删除对象有些相似，成员数组需要在成员释放前释放。
+
+\begin{codebox}[cpp]
+clReleaseKernel(kernel);
+clReleaseProgram(program);
+clReleaseCommandQueue(cmdQueue);
+clReleaseMemObject(bufA);
+clReleaseMemObject(bufB);
+clReleaseMemObject(bufC);
+clReleaseContext(context);
+\end{codebox}
+
+\subsection{向量相加的完整代码}
+
+下面将完整的展示向量相加这个例子。其具有上一节的所有步骤，不过这个例子中使用了第一个平台对象和设备对象。
+
+\begin{codeboxt}[cpp]{代码清单3.4 使用C API实现的OpenCL向量相加}
+// This program implements a vector addition using OpenCL
+
+// System includes
+#include <stdio.h>
+#include <stdlin.h>
+// OpenCL includes
+#include <CL/cl.h>
+
+// OpenCL kernel to perform an element-wise addition
+const char *programSouce =
+"__kernel                                         \n"
+"void vecadd(__global int *A,                     \n"
+"            __global int *B,                     \n"
+"            __global int *C)                     \n"
+"{                                                \n"
+"  // Get the work-item's unique ID               \n"
+"  int idx = get_global_id(0);                    \n"
+"                                                 \n"
+"  // Add the corresponding locations of          \n"
+"  // 'A' and 'B', and store the reasult in 'C'   \n"
+"  C[idx] = A[idx] + B[idx];                      \n"
+"}                                                \n"
+;
+
+int main(){
+  // This code executes on the OpenCL host
+
+  // Elements in each array
+  const int elements = 2048;
+
+  // Compute the size of the data
+  size_t datasize = sizeof(int) * elements;
+
+  // Allocate space for input/output host data
+  int *A = (int *)malloc(datasize); // Input array
+  int *B = (int *)malloc(datasize); // Input array
+  int *C = (int *)malloc(datasize); // Output array
+
+  // Initialize the input data
+  int i;
+  for (i = 0; i < elements; i++){
+    A[i] = i;
+    B[i] = i;
+  }
+
+  // Use this to check the output of each API call
+  cl_int status;
+
+  // Get the first platforms
+  cl_platform_id platform;
+  status = clGetPlatformIDs(1, &perform, NULL);
+
+  // Get the first devices
+  cl_device_id device;
+  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 1, &device, NULL);
+
+  // Create a context and associate it with the device
+  cl_context context = clCreateContext(NULL, 1, &device, NULL, NULL, &status);
+
+  // Create a command-queue and associate it with device
+  cl_command_queue cmdQueue = clCreateCommandQUeueWithProperties(context, device, 0, &status);
+
+  // Allocate two input buffers and one output buffer for the three vectors in the vector addition
+  cl_mem bufA = clCreateBuffer(context, CL_MEM_READ_ONLY, datasize, NULL, &status);
+  cl_mem bufB = clCreateBuffer(context, CL_MEM_READ_ONLY, datasize, NULL, &status);
+  cl_mem bufC = clCreateBuffer(context, CL_MEM_WRITE_ONLY, datasize, NULL, &status);
+
+  // Write data from the input arrays to the buffers
+  status = clEnqueueWriteBuffer(cmdQueue, bufA, CL_FALSE, 0, datasize, A, 0, NULL, NULL);
+  status = clEnqueueWriteBuffer(cmdQueue, bufB, CL_FALSE, 0, datasize, B, 0, NULL, NULL);
+
+  // Create a program with source code
+  cl_program program = clCreateProgramWithSource(context, 1, (const char**)&programSource, NULL, &status);
+
+  // Build(compile) the program for the device
+  status = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+
+  // Create the vector addition kernel
+  cl_kernel kernel = clCreateKernel(program, "vecadd", &status);
+
+  // Set the kernel arguments
+  status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufA);
+  status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufB);
+  status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufC);
+
+  // Define an incde space of work-items for execution
+  // A work-group size is not required, but can be used.
+  size_t indexSpaceSize[1], workGroupSize[1];
+
+  // There are 'elements' work-items
+  indexSpaceSize[0] = elements;
+  workGroupSize[0] = 256;
+
+  // Execute the kernel
+  status = clEnqueueNDRangeKernel(cmdQueue, kernel, 1, NULL, indexSpaceSize, workGroupSize, 0, NULL, NULL);
+
+  // Read the device output buffer to the host output array
+  status = clEnqueueReadBuffer(cmdQueue, bufC, CL_TRUE, 0, datasize, C, 0, NULL, NULL);
+
+  // Free OpenCL resouces
+  clReleaseKernel(kernel);
+  clReleaseProgram(program);
+  clReleaseCommandQueue(cmdQueue);
+  clReleaseMemObject(bufA);
+  clReleaseMemObject(bufB);
+  clReleaseMemObject(bufC);
+  clReleaseContext(context);
+
+  // free host resouces
+  free(A);
+  free(B);
+  free(C);
+
+  return 0;
+}
+\end{codeboxt}
+
+
+
+% ---- 3.7-chinese.md ----
+\section{OpenCL C++ Wapper向量加法}
+
+Khronos组织也在后续的OpenCL标准中定义了一套\texttt{C++} Wapper API。\texttt{C++} API与C API是对应的(比如，cl::Memory对应cl\_\allowbreak{}mem)，不过\texttt{C++}需要对异常和类进行处理。下面的代码对应的与代码清单3.4中的C代码相对应。
+
+\begin{codeboxt}[cpp]{代码清单3.5 使用C++ Wapper实现的OpenCL向量相加}
+#define __CL_ENABLE_EXCEPTIONS
+
+#include <CL/cl.hpp>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+
+int main(){
+  const int elements = 2048;
+  size_t datasize = sizeof(int) * elements;
+
+  int *A = new int[elements];
+  int *B = new int[elements];
+  int *C = new int[elements];
+
+  for (int i = 0; i < elements; i++){
+    A[i] = i;
+    B[i] = i;
+  }
+
+  try{
+    // Query for platforms
+    std::vector<cl::Platform> platforms;
+    cl::Platform::get(&platforms);
+
+    // Get a list of devices on this platform
+    std::vector<cl::Device> devices;
+
+    platforms[0].getDevices(CL_DEVICE_TYPE_ALL, &devices);
+
+    // Create a context for the devices
+    cl::Context context(devices);
+
+    // Create a command-queue for the first device
+    cl::CommandQueue queue = cl::CommandQueue(context, devices[0]);
+
+    // Create the memory buffers
+    cl::Buffer bufferA = cl::Buffer(context, CL_MEM_READ_ONLY, datasize);
+    cl::Buffer bufferB = cl::Buffer(context, CL_MEM_READ_ONLY, datasize);
+    cl::Buffer bufferC = cl::Buffer(context, CL_MEM_WRITE_ONLY, datasize);
+
+    // Copy the input data to the input buffers using the
+    // command-queue for the first device
+    queue.enqueueWriteBuffer(bufferA, CL_TRUE, 0, datasize, A);
+    queue.enqueueWriteBuffer(bufferB, CL_TRUE, 0, datasize, B);
+
+    // Read the program source
+    std::ifstream sourceFile("vector_add_kernel.cl");
+    std::string sourceCode(std::istreambuf_iterator<char>(sourceFile), (std::istreambuf_iterator<char>()));
+    cl::Program::Source source(1, std::make_pair(sourceCode.c_str(), sourceCode.length() + 1);
+
+    // Create the program from the source code
+    cl::Program program = cl::Program(context, source);
+
+    // Build the program for the devices
+    program.build(devices);
+
+    // Create the kernel
+    cl::Kernel vecadd_kernel(program, "vecadd");
+
+    // Set the kernel arguments
+    vecadd_kernel.setArg(0, bufferA);
+    vecadd_kernel.setArg(1, bufferB);
+    vecadd_kernel.setArg(2, bufferC);
+
+    // Execute the kernel
+    cl::NDRange gloabl(elements);
+    cl::NDRange local(256);
+
+    queue.enqueueNDRangeKernel(vecadd_kernel, cl::NullRange, gloabl, local);
+
+    // Copy the output data back to the host
+    queue.enqueueReadBuffer(bufferC, CL_TRUE, 0, datasize, C);
+  } catch(cl::Error error){
+    std::cout << error.what() << "(" << error.err() << ")" << std::endl;
+  }
+}
+\end{codeboxt}
+
+
+
+% ---- 3.8-chinese.md ----
+\section{CUDA编程者使用OpenCL的注意事项}
+
+英伟达的CUDA C提供的API与OpenCL类似。代码清单3.6用使用CUDA实现了向量相加，OpenCL和CUDA中的很多命令都可以相互对应。OpenCL API中有更多的参数，这是因为OpenCL需要在运行时去查找平台，并对程序进行编译。CUDA C只针对英伟达的GPU，其只有一个平台可以使用，所以平台的查找自动完成；将程序编译成PTX的过程可以在编译主机端二进制文件的时候进行(CUDA没有运行时编译)。
+
+OpenCL中平台在运行时进行查找，程序需要选择一个目标设备，并在运行时进行编译。程序的编译不能在运行时之外完成，因为不知道哪个具体设备要去执行内核，无法在这种情况下生成中间码(IL/ISA)。比如，一个OpenCL内核在AMD GPU上测试有没有问题，但当其需要运行在Intel的设备上时，编译器生成的中间码就和AMD平台上的不太一样。从而，对与平台的查找，以及在运行时进行编译程序就能避免这样的问题。
+
+OpenCL和CUDA C最大的区别是，CUDA C提供一些特殊的操作完成内核启动，其编译需要使用一套工具链，这套工具链中需要包含英伟达支持的预处理器。预处理器生成的代码，和OpenCL的内核代码十分相近。
+
+\begin{codeboxt}[cpp]{代码清单3.6 CUDA C版本的向量相加}
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+// CUDA kernel. Eache thread computes one element of C
+__global__ void vecAdd(int *A, int *B, int *C, int elements){
+  // Compute the global thread ID using CUDA intrinsics
+  int id = blocakIdx.x * blocakDim.x + threadIdx.x;
+
+  // Must check that the thread is not out of bounds
+  if (id < elements)
+    C[id] = A[id] + B[id];
+}
+
+int main(int argc, char *argv[]){
+  // Elements in each array
+  const int elements = 2048;
+
+  // Compute the size of the data
+  size_t datasize = sizeof(int) * elements;
+
+  // Allocate space for input/output host data
+  int *A = (int *)malloc(datasize); // Input array
+  int *B = (int *)malloc(datasize); // Input array
+  int *C = (int *)malloc(datasize); // Output array
+
+  // Device input vectors
+  int *bufA;
+  int *bufB;
+  // Device output vectors
+  int *bufC;
+
+  // Allocate memeory for each vector on GPU
+  cudaMalloc(&bufA, datasize);
+  cudaMalloc(&bufB, datasize);
+  cudaMalloc(&bufC, datasize);
+
+  int i;
+  // Initialize vectors on host
+  for (i = 0; i < elements; i++){
+    A[i] = i;
+    B[i] = i;
+  }
+
+  // Copy host vectors to device
+  cudaMemcpy(bufA, A, datasize, cudaMemcpyHostToDevice);
+  cudaMemcpy(bufB, B, datasize, cudaMemcpyHostToDevice);
+
+  int blockSize, gridSize;
+
+  // Number of threads in each thread block
+  blockSize = 256;
+
+  // Number of thread blocks in grid
+  gridSize = elements / blockSize;
+
+  // Execute the kernel
+  vecAdd<<<gridSize, blockSize>>>(bufA, bufB, bufC, elements);
+
+  // Copy array back to host
+  cudaMemcpy(C, bufC, datasize, cudaMemcpyDeviceToHost);
+
+  // Release device memeory
+  cudaFree(bufA);
+  cudaFree(bufB);
+  cudaFree(bufC);
+
+  // Release host memeoy
+  free(A);
+  free(B);
+  free(C);
+}
+\end{codeboxt}
+
+

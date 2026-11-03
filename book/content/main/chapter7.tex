@@ -1,0 +1,624 @@
+% ============================================================
+%  第7章 OpenCL设备端内存模型
+%  源文件：content/chapter7/
+% ============================================================
+
+设备端内存模型定义了OpenCL应用中工作项的内存空间，这部分空间供内核执行使用。内存模型也定了一致性内存，可供工作项使用。本章会对每种内存空间进行详细的讨论，聊一下各个内存对象所对应的内存空间，也顺便介绍一下同步和内存序。
+
+OpenCL设备上，内存空间被分成四种类型：
+
+\begin{enumerate}
+\item 全局内存
+\item 局部内存
+\item 常量内存
+\item 私有内存
+\end{enumerate}
+
+OpenCL内存空间分布如图7.1所示。第2章我们讨论过，OpenCL是为了更加广阔的结构进行设计。对内存模型的分级，使得OpenCL程序对架构的利用率更高。每种内存内存空间在实际硬件上的映射，非常影响程序执行效率。不管在硬件上是如何进行映射，对于编程者来说，内存空间都是分开的。此外，如图7.1所示，本地内存和私有内存用来区分工作项和工作组。当使用这种方式对“可编程的松散内存一致模型”进行分层时，使用便签式内存可使得程序更加高效。如我们看到的大多GPU设备一样，都有和x86架构一样的内存一致性系统。
+
+\myGraphic{0.92}{images/chapter7/7-1.png}{图7.1 OpenCL设备端的内存空间分布}
+
+内核函数中的函数参数和局部变量默认都在私有内存中存储。指针参数放置的位置就没有那么固定了，其取决于数据从哪来，或哪里是用到这些数据。指针本身的地址则毫无疑问的存储在私有内存中。如果通过指针指定数据，那么内存地址将严格分离。将一个地址空间的数据强制转换成另一地址的数据，这样做是非法的，因为这样做的话必然会在全局可访问的地址上创建一个内存副本，或是使用编译器在某块地址空间内创建一份数据副本，这在实际中是无法完成的。不过，本章我们将介绍OpenCL 2.0新添加的统一地址空间，其能在某些条件下推断出可访问的地址空间。图像也可以使用统一地址空间，所以我们也会在讨论统一地址空间时讨论图像。
+
+详细讨论这些内存之前，后续几节将大致描述一下工作项同步和通讯的能力。了解了这些能力，对于我们讨论各个内存空间的特性很有帮助。
+
+
+% ---- 7.1-chinese.md ----
+\section{同步和交互}
+
+介绍主机端内存模型时，我们提到过，当内核在对内存进行修改时，不能保证主机端可见的数据的状态。同样，当一个工作项对地址中的数据进行修改时，其他工作项可见的数据状态是不确定的。不过，OpenCL C(结合内存模型)提供一些同步操作以保证内存的一致性，例如：执行栅栏、内存栅栏和原子操作。层级的一致性描述如下：
+
+\begin{itemize}
+\item 工作项内部，内存操作的顺序可预测：对于同一地址的两次读写将会被硬件或编译器重新排序。特别是对于图像对象的访问，即使被同一工作项操作，同步时也需要遵循“读后写”的顺序。
+\item 原子操作、内存栅栏或执行栅栏操作能保证同一工作组中的两个工作项，看到的数据一致。
+\item 原子操作、内存栅栏或执行栅栏操作能保证工作组的数据一致。不同工作组的工作项无法使用栅栏进行同步。
+\end{itemize}
+
+\subsection{栅栏}
+
+工作组中，编程者需要使用栅栏对工作组中的所有工作项进行同步，要使用的内置函数为work\_\allowbreak{}group\_\allowbreak{}barrier()。其有两个重载版本：
+
+\begin{codebox}[cpp]
+void
+work_group_barrier(
+  cl_mem_fence_flags flags)
+
+void
+work_group_barrier(
+  cl_mme_fence_flags flags,
+  memory_scope scope)
+\end{codebox}
+
+栅栏要求工作组中的所有工作项都要达到指定位置，才能继续下面的工作。这样的操作能保证工作组内的数据保持一致(比如：将全局内存上的一个子集数据传输到局部内存中)。其中flags用来指定需要使用栅栏来同步的内存类型。其有三个选项：CLK\_\allowbreak{}LOCAL\_\allowbreak{}MEM\_\allowbreak{}FENCE、CLK\_\allowbreak{}GLOBAL\_\allowbreak{}MEM\_\allowbreak{}FENCE和CLK\_\allowbreak{}IMAGE\_\allowbreak{}MEM\_\allowbreak{}FENCE，这三个选项分别对应能被整个工作组访问到的三种不同内存类型：局部内存、全局内存和图像内存。
+
+第二版work\_\allowbreak{}group\_\allowbreak{}barrier()也可以指定内存范围。其结合flags可以进行更加细粒度的数据管理。scope有两个有效参数：memory\_\allowbreak{}scope\_\allowbreak{}work\_\allowbreak{}group和memory\_\allowbreak{}scope\_\allowbreak{}device。当将memory\_\allowbreak{}scope\_\allowbreak{}work\_\allowbreak{}group和CLK\_\allowbreak{}GLOBAL\_\allowbreak{}MEM\_\allowbreak{}FENCE一起使用时，栅栏则能保证所有工作组中每个工作项在到达同步点时，可以看到其他所有工作项完成的数据。当将memory\_\allowbreak{}scope\_\allowbreak{}device和CLK\_\allowbreak{}GLOBAL\_\allowbreak{}MEM\_\allowbreak{}FENCE一起使用时，栅栏则能保证内存可被整个设备进行访问。CLK\_\allowbreak{}LOCAL\_\allowbreak{}MEM\_\allowbreak{}FENCE只能和memory\_\allowbreak{}scope\_\allowbreak{}work\_\allowbreak{}group一起使用，其只能保证工作组内的数据一致，无法对该工作组之外的工作项做任何保证。
+
+\subsection{原子操作}
+
+基于C/C++11标准，OpenCL 2.0也更新了原子操作。并且新加入的操作，不仅可以进行原子操作，还可以用来做同步。原子性能保证一系列内存操作(比如：读改写)，且不需要其他工作项和主机的参与，就能直接修改某个内存的数据。当原子操作用来做同步，那么就需要对特定的变量进行访问(称为同步变量)，这个变量就属于内存一致性模型的执行部分。原子操作也有多种方式，包括原子“读改写”，原子加载和原子存储。
+
+我们之前提到过，原子操作可以保证内存的某些不一致状态不对其他线程可见——不过，这给共享内存和并发编程就是带来了一些问题。试想，当有两个线程尝试对同一个变量进行加法操作。线程0需要读取内存中的数据，然后对数值进行加法操作，最后写回原始内存中。线程1执行加法计算的过程也是一样的。图7.2就展示了同样是两个线程对同一变量进行加法操作，最后会得到不同的结果。这中问题就称为\emph{数据竞争}(data race)。即使在单核机器上，也会有数据竞争的存在，比如线程0打断或抢占了正在执行操作的时间片。
+
+\myGraphic{0.92}{images/chapter7/7-2.png}{图7.2 对同一变量的进行加法操作，所导致的数据竞争。最终数据的结果依赖于不同线程执行的顺序。}
+
+因此，就需要原子加载和原子存储操作来为数据竞争做一决断。C/C++11标准与OpenCL标准很像，不会保证任何加载和存储操作是绝对原子的。试想这样一种情形，将存储64位的操作分成两个指令执行。当第一个指令完成时，第二个指令还没有执行，在某些情况下是没有问题的。如果这时出现了另外一个线程，该线程执行一个加载操作，如果第二个存储指令还未完成，那么该线程所读取到高或第32位就不是最新的值。这样的读取方式显然是荒谬的，并且会得到与期望不符的结果。实际上，大多数结构中都会提供不同粒度的原子操作，来保证加载和存储数据的一致性(通常需要内存对齐在同一缓存行上)。不过，对于可移植代码来说，共享内存上的任何操作都不能认为是原子的。
+
+原子操作在OpenCL 2.0标准做了相当多的修改。OpenCL C语言定义了与基本类型相关的原子类型，其支持整型和单精度浮点类型：
+
+\begin{codebox}[text]
+atomic_int
+atomic_uint
+atomic_float [1]
+\end{codebox}
+
+如果设备支持64bit原子扩展，那么就需要添加一些原子类型：
+
+\begin{codebox}[text]
+atomic_long
+atomic_ulong
+atomic_double
+atomic_size_t
+atomic_intptr_t
+atomic_uintptr_t
+atomic_ptrdiff_t
+\end{codebox}
+
+64位原子指针类型只针对能够使用64位地址空间的计算设备。
+
+OpenCL C语言定义了很多的原子操作。浮点操作只支持“比较后交换”类型的原子操作(比如，atomic\_\allowbreak{}exchange())。算法中的一些操作，以及一些位运算中，需要调用“同步后修改”原子函数。其声明类型如下所示：
+
+\begin{codebox}[cpp]
+C atomic_fetch_<key>(volatile A *object, M operand)
+\end{codebox}
+
+其中key可以替换成add, sub, or, xor, and, min和max。object传入的是原子类型的指针，operand传入的是要进行操作的数值。返回值C是非原子版的A，其值是在对M操作之前A内存中的具体数值。这里来举个原子操作的例子，当要在一个共享项中比较最小值时，我们先定义一个最小值atomic\_\allowbreak{}int curMin，和一个新的值int myMin。那么就可以写成如下形式：
+
+\begin{codebox}[cpp]
+int oldMin = atomic_fetch_min(&curMin, myMin);
+\end{codebox}
+
+执行完成后，新的最小值将存在curMin中。是否接收返回值是可选的，不接收返回值会有潜在的性能提升。一些GPU架构中，例如：原子操作执行在内存系统中的硬件单元上。因此，在这种分层内存上原子操作很快就能执行完成。不过，如果需要使用返回值的话，通常需要将原始值从内存中读取出来，这就需要增加成千上万个时钟延迟。
+
+内存模型的章节中对原子操作进行讨论，是因为其能进行内存同步，保证内存的一致性。不管原子操作什么时候执行，编程者都有能力指定该原子操作是否附带有同步功能，作为获取操作或释放操作。使用这种方式允许工作项能够控制可见数据访问，这样就能做到工作项间的通讯，而2.0之前的OpenCL标准是无法完成这项操作的。
+
+\myRefRule
+
+\begin{myRefs}
+
+[1] atomic\_\allowbreak{}float 类型只支“比较后交换”类型的原子操作，不支持“同步后修改”类型操作(详见7.7.1节)
+
+\end{myRefs}
+
+
+
+% ---- 7.2-chinese.md ----
+\section{全局内存}
+
+OpenCL C中使用类型修饰符\_\allowbreak{}\_\allowbreak{}global(或global)描述的指针就是全局内存。全局内存的数据可以被执行内核中的所有工作项(比如：设备中的计算单元)所访问到。不同类型的内存对象的作用域是不同的。下面的小节中，将详细讨论每种全局内存对象。
+
+\subsection{数组}
+
+\_\allowbreak{}\_\allowbreak{}global可以用来描述一个全局数组。数组中可以存放任意类型的数据：标量、矢量或自定义类型。无论数组中存放着什么类型的数据，其是通过指针顺序的方式进行访问，并且执行内核可以对数组进行读写，也可以设置成针对内核只读或只写的数组。
+
+数组数据和C语言的数组几乎没有任何区别，C语言怎么使用的，就可以在OpenCL内核代码中怎么使用：
+
+\begin{codebox}[cpp]
+float a[10], b[10];
+for (int i = 0; i < 10; ++i){
+  *(a + 1) = b[i];
+}
+\end{codebox}
+
+上面的例子中，通过数组a和b的指针对其内容进行访问。其中尤其重要的是，其中内存以连续的方式顺序开辟，a数组中第i个元素可以表示为a[i]，其指针地址为a+i。我们可以使用sizeof()操作来计算数组中元素的大小，然后计算对应指针的偏移，以便将指针从一种类型转换成另一种类型。底层代码中，指针转换是相当有用的方式，对于OpenCL这种以C语言驱动的标准来说，也自然会支持这种方式。
+
+下面的例子展示了如何在OpenCL内核代码中，使用数组对象支持自定义类型：
+
+\begin{codebox}[cpp]
+typedef struct AStructure{
+  float a;
+  float b;
+}AStructure;
+
+__kernel void aFunction(
+  __global AStructure *inputOutputBuffer){
+
+  __global AStructure *inputLocation =
+    inputOutputBuffer + get_global_id(0);
+  __global AStructure *outputLoacation =
+    inputOutputBuffer + get_global_size(0) + get_global_id(0);
+
+  outputLoacation->a = inputLocation->a * -1;
+  outputLoacation->b = (*inputLocation).b + 3.f;
+}
+\end{codebox}
+
+\subsection{图像}
+
+图像对象也会在全局内存上开辟，其与数组不同，其不能映射成一个指针。图像对象维度有一维、二维和三维，其分别对应图像类型image1d\_\allowbreak{}t、image2d\_\allowbreak{}t和image3d\_\allowbreak{}t。OpenCL 2.0之前的标准，只允许图像对象只读或只写，无法在内核中同时进行图像的读和写的操作。这样的设计是因为GPU硬件支持高速缓存和高速滤波器。从2.0标准开始，支持对对同一图像对象的读和写。
+
+图像对象是不透明的内存对象。虽然我们可以根据坐标对数据进行访问，但是我们无法知道其在内存上的相对位置。实际内存上，看上去在图像上相邻的两个点，可能在物理地址上距离很远。这样的特性，使得图像对象更适合进行参数化的读取，而非直接通过指针获取对应位置的数据，因此OpenCL中提供了一些内置函数，用来获取图像数据。对于读取图像的内置函数有：read\_\allowbreak{}imagef()、read\_\allowbreak{}imagei()和read\_\allowbreak{}imageui()，分别可读取单浮点、整型和无符号整型数据。每个图像读取函数都具有三个参数：图像对象、图像采样器和坐标位置。
+
+可以传入整型和浮点型坐标值。返回值通常是具有四个元素的矢量。例如，下面读取二维浮点数据的函数声明：
+
+\begin{codebox}[cpp]
+float4
+read_imagef(
+  image2d_t image,
+  sampler_t samper,
+  int2 coord)
+
+float4
+read_imagef(
+  image2d_t image,
+  sampler_t samper,
+  float2 coord)
+\end{codebox}
+
+注意这里传入的坐标使用的是int2和float2类型。因为指定的二维图像类型，image2d\_\allowbreak{}t。对于一维图像类型，传入int和float类型的坐标即可。对于三维图像类型，需要传入int4和float4类型的数据，其中最后一个分量不会是用到(译者注：在OpenCL中type3类型其实均是由type4类型表示)。
+
+如果图像数据不足四个通道，那么大多数图像类型将返回0，用来表示未使用的颜色通道，返回1代表着alpha(透明度)通道。例如，读取单通道图像(CL\_\allowbreak{}R)，那么返回的float4类型中就会是这样(r, 0.0, 0.0, 1.0)。
+
+读取函数的第二个参数是采样器。其表示硬件或运行时系统如何看待图像对象。创建采样器对象可以在内核端创建sampler\_\allowbreak{}t类型对象，也可以在主机端使用\texttt{clCreateSampler()}API进行创建。下面就是使用常量声明的采样器：
+
+\begin{codebox}[cpp]
+__constant sampler_t sampler =
+  CLK_NORMALIZED_COORDS_FALSE |
+  CLK_FILTER_NEAREST          |
+  CLK_ADDRESS_CLAMP;
+
+__kernel void samplerUser(
+  __read_only image2d_t sourceImage,
+  __global float *outputBufffer){
+
+  float4 a = read_imagef(
+    sourceImage,
+    sampler,
+    (float2)(
+      (float)(get_global_id(0)),
+      (float)(get_global_id(1))));
+
+  outputBuffer[get_global_id(1) * get_global_size(0) + get_global_id(0)] = a.x + a.y + a.z + a.w;
+}
+\end{codebox}
+
+采样器对象决定了如何对图像对象进行寻址，以及相应的滤波模式，并且决定了传入的坐标是否进行归一化。
+
+指定归一化坐标(CLK\_\allowbreak{}NORMALIZED\_\allowbreak{}COORDS\_\allowbreak{}TRUE)就是告诉采样器在对应维度的[0,1]之间对图像进行寻址。使用非归一化(CLK\_\allowbreak{}NORMALIZED\_\allowbreak{}COORDS\_\allowbreak{}FALSE)则直接使用传入的坐标在对应维度上进行寻址。
+
+寻址模式用来解决当采样器采样到图像之外的范围时，应该返回何值。这对于一些不想进行边缘判断编程者来说，使用标志指定如何处理这种“越界访问”会很方便(比如:在进行卷积操作时，就会访问到图像之外的区域)。CLK\_\allowbreak{}ADDRESS\_\allowbreak{}CLAMP[1]会将超出部分截断，将返回一个边界值；CLK\_\allowbreak{}ADDRESS\_\allowbreak{}REPEAT[2]超出部分会返回一个在有效范围内的值。
+
+滤波模式有两个选项：返回离给定坐标最近的图像元素值(CLK\_\allowbreak{}FILTER\_\allowbreak{}NEAREST)，或使用坐标周围图像点进行线性差值(CLK\_\allowbreak{}FILTER\_\allowbreak{}LINEAR)。如果对于二维图像就要使用周围2x2个点进行差值了。如果是三维图那么就要周围2x2x2个点进行差值了。
+
+为了让使用图像对象更加简单，OpenCL C语言也支持采样器的读取方式：
+
+\begin{codebox}[cpp]
+float4
+read_imagef(
+  image2d_t image,
+  int2 coord)
+\end{codebox}
+
+这种简单的方式会预定义一个采样器，这个默认采样器的坐标是非标准化的，且不会进行任何方式的滤波，还有就是访问到图像之外的区域所产生的行为是未定义的。使用这种简单的方式对图像进行访问，有点类似于在C中使用一维或者二维数组。不过，这种不透明的访存方式底层，会使用硬件对访存进行加速。
+
+与读不同，写入函数就不需要传递采样器对象。取代采样器的是要写入图像的具体数值：(在写入图像时，所提供的坐标必须是非归一化的。)
+
+\begin{codebox}[cpp]
+void
+write_imagef(
+  image2d_t image,
+  int2 coord,
+  float4 color)
+\end{codebox}
+
+之前有谈及，图像实现成非透明的类型是因为其能使用硬件或运行时系统对其进行加速，而对于数组对象则没有这样的优待。举一个优化方面的例子。任意给定一个多维数据结构，都必须映射到一维空间上，然后通过指针进行访问。很多编程语言中，对待多维数组都是这样做的，有些语言使用的是行优先，有些是列优先而已。如果数据以行优先的方式存储，(x, y)的内存为就在(x + 1, y)之前，以此类推。行优先的存储方式使得(x, y)和(x, y + 1)就离的很远了。因为y的地址在内存中不是连续的，所以跨列访问在行优先存储方式中的访存延迟是十分高的，从而访问效率是比较低的。因为(x, y)和(x + 1, y)的访问效率很高，所以后面会提出内存合并访问的概念。
+
+Z序或莫尔顿序中，使用一种映射的方式来保存空间中的数据。图7.3中数据保存的顺序为(0, 0),(0, 1),(1, 1)和(2, 0)，以此类推。当使用Z序排布内存时，列上的数据都在同一缓存行上，优化了访问列上元素的时间开销。如果我们正在使用二维图像进行计算，那么这种内存存放方式无疑会对我们有很大的帮助。这种排布优化可能是透明的(因此不同的优化方式可以执行在不同的架构下)，需要编程者做的只是需要保证内存的相对位置正确即可。
+
+\myGraphic{0.92}{images/chapter7/7-3.png}{图7.3 应用Z序对二维图像进行映射}
+
+这个话题我们可以在讨论的深一些。当我们所执行的架构中没有向量寄存器时，就无法执行向量读取操作。这时我们就希望编译器将\texttt{float4 a = read\_imagef(sourceImage, imageSampler, location)}翻译成4个标量，从而替代原始的单个向量读取。这种情况下，更加高效的方式是将原始图像根据位移拆成4个数组，同时对这4个数组进行访存操作。而不是通过4次读取一个数组的方式，获取到4个对应的值。
+
+\subsection{管道}
+
+之前提到过管道对象，其存储结构为顺序结构存储，数据出入遵循先入先出原则。管道对象与数组和图像对象有些不同。不需要对管道对象进行任何寻址空间描述：当管道对象在两个内核对象之间通讯时，其会隐式的将数据保存在全局内存中。作为内核参数时，与图像对象一样，将对应参数指定成pipe类型就可以了。与图像不同的是，管道必须要指定所数据包所存储的数据类型。数据类型可以是任何OpenCL C所支持的类型(标量或矢量，浮点或整型)，其也支持用户自定义类型的数据。在编程者将管道传入内核时，需要指定一下管道对象在设备端的可读写性(\_\allowbreak{}\_\allowbreak{}read\_\allowbreak{}only或read\_\allowbreak{}only, \_\allowbreak{}\_\allowbreak{}write\_\allowbreak{}only或write\_\allowbreak{}only)。默认的方式是可读。管道对象在同一内核中不支持同时读写，所以这里传递读写描述符(\_\allowbreak{}\_\allowbreak{}read\_\allowbreak{}write或read\_\allowbreak{}write)在编译时编译器会报错。
+
+一个内核声明中包含输入和输出管道的例子：
+
+\begin{codebox}[cpp]
+kernel
+void foo(
+  read_only pipe int pipe0,
+  write_only pipe float4 pipe1)
+\end{codebox}
+
+与图像相同，管道对象也是不透明的。这是为了提供先入先出功能，并且不能进行随机访问。OpenCL C提供了内置函数用于从管道读取，或者向管道写入数据包的函数。和管道对象互动的最基本的两个函数如下：
+
+\begin{codebox}[cpp]
+int
+read_pipe(
+  pipe gentype p,
+  gentype *ptr)
+
+int
+write_pipe(
+  pipe gentype p,
+  const gentype *ptr)
+\end{codebox}
+
+这些函数需要传入一个管道对象，还需要传入一个需要写入和读出的位置指针。当读或写的函数执行成功的话，函数就会返回0。在有些情况下这些函数调用不会成功。当管道为空时，read\_\allowbreak{}pipe()将会返回一个负值；当管道满了时，write\_\allowbreak{}pipe()会返回一个负值。
+
+编程者需要保证管道有足够的空间进行写入或者读出。reserve\_\allowbreak{}read\_\allowbreak{}pipe()和reserve\_\allowbreak{}write\_\allowbreak{}pipe()就会返回一个\emph{占位标识符}(reservation identifier)，其类型为reserve\_\allowbreak{}id\_\allowbreak{}t。
+
+\begin{codebox}[cpp]
+reserve_id_t
+reserve_read_pipe(
+  pipe gentype p,
+  nint num_packets)
+
+reserve_id_t
+reserve_write_pipe(
+  pipe gentype p,
+  uint unm_packets)
+\end{codebox}
+
+read\_\allowbreak{}pipe()和write\_\allowbreak{}pipe()有可以传入reserve\_\allowbreak{}id\_\allowbreak{}t的版本：
+
+\begin{codebox}[cpp]
+int
+read_pipe(
+  pipe gentype p,
+  reserve_id_t reserve_id,
+  uint index,
+  gentype *ptr)
+\end{codebox}
+
+当使用占位标识符时，OpenCL C提供了相应的阻塞函数，用来保证读出或写入过程完成：commit\_\allowbreak{}read\_\allowbreak{}pipe()和commit\_\allowbreak{}write\_\allowbreak{}pipe()。这些函数需要传入一个占位标识符和一个管道对象，并且没有返回值。当这些函数返回时，就能保证所有读或写操作完全提交。
+
+\begin{codebox}[cpp]
+void
+commit_read_pipe(
+  read_only pipe gentype p,
+  reserve_id_t reserve_id)
+
+void
+commit_write_pipe(
+  write_only pipe gentype p,
+  reserve_id_t reserve_id)
+\end{codebox}
+
+不同内核中的工作项对管道进行读取或写入，这就让有些内核成为生产者或消费者(在工作组的粒度方面)。为了能正确的将管道对象上的数据删除，需要对工作项进行屏蔽，OpenCL C提供了相应的函数可以让每个工作组能够项管道对象进行预留和提交操作。这些函数为：work\_\allowbreak{}group\_\allowbreak{}reserve\_\allowbreak{}write\_\allowbreak{}pipe()和work\_\allowbreak{}group\_\allowbreak{}reserve\_\allowbreak{}read\_\allowbreak{}pipe()。同样，为了保证访问管道对象正常完成，提供了work\_\allowbreak{}group\_\allowbreak{}commit\_\allowbreak{}read\_\allowbreak{}pipe()和work\_\allowbreak{}group\_\allowbreak{}commit\_\allowbreak{}write\_\allowbreak{}pipe()。对于每个工作组函数来说，这些函数在工作项内是成对出现的。注意，所以工作项都会调用基于工作组的函数，除非出现一些未定义的行为。实践中，访问管道对象还是会使用read\_\allowbreak{}pipe()和write\_\allowbreak{}pipe()。第4章中，我们对管道对象进行过讨论，并使用过于管道对象相关的API。
+
+\myRefRule
+
+\begin{myRefs}
+
+[1] CLK\_\allowbreak{}ADDRESS\_\allowbreak{}CLAMP - out-of-range image coordinates will return a border color. This is similar to the GL\_\allowbreak{}ADDRESS\_\allowbreak{}CLAMP\_\allowbreak{}TO\_\allowbreak{}BORDER addressing mode.
+
+[2] CLK\_\allowbreak{}ADDRESS\_\allowbreak{}REPEAT - out-of-range image coordinates are wrapped to the valid range. This address mode can only be used with normalized coordinates. If normalized coordinates are not used, this addressing mode may generate image coordinates that are undefined.
+
+\end{myRefs}
+
+
+
+% ---- 7.3-chinese.md ----
+\section{常量内存}
+
+常量内存使用\_\allowbreak{}\_\allowbreak{}constant标识进行描述，常量内存作为全局地址空间的一部分，在运行时可以分配出出相应的缓存空间，利用常量内存可以提高应用访存效率。使用常量地址空间的方式有两种：
+
+\begin{enumerate}
+\item 可以通过数组创建的方式，之后将数组作为参数传入内核中。内核参数描述上，必须指定\_\allowbreak{}\_\allowbreak{}constant为对应指针的标识符。
+\item 内核端声明常量对象，并使用\_\allowbreak{}\_\allowbreak{}constant标识对其进行初始化，其属于编译时常量类型。
+\end{enumerate}
+
+不同架构下，常量内存对应的位置也不同。AMD GPU上常量数据将会保存在缓存上(保存通用数据)。该缓存比L1缓存的延迟还要低，并且能大大减少GPU内的数据传输。根据这种访存模式，其地址可能就直接保存在指令中，就算是释放功能单元也只有极低的寻址延迟。
+
+OpenCL对每个设备会有常量参数个数的限制，以及常量数组的最大尺寸。编程者可以将CL\_\allowbreak{}DEVICE\_\allowbreak{}MAX\_\allowbreak{}CONSTANT\_\allowbreak{}ARGS和CL\_\allowbreak{}DEVICE\_\allowbreak{}MAX\_\allowbreak{}CONSTANT\_\allowbreak{}BUFFER\_\allowbreak{}SIZE传入clGetDeviceInfo()进行查询。第8章中，我们介绍在现代GPU上如何实现常量内存。
+
+
+
+% ---- 7.4-chinese.md ----
+\section{局部内存}
+
+OpenCL也支持一些架构的子集，包括多GPU和Cell带宽引擎，用于处理小暂存式缓存数组在主DRAM和基础缓存上的分布。局部内存与全局内存没有交集，访问两种内存所使用的是不同的操作。基于这种架构，不同内存之间就需要进行数据传输(使用async\_\allowbreak{}work\_\allowbreak{}group\_\allowbreak{}copy()进行拷贝会更高效)，或者直接内存间的拷贝。局部内存也同样支持CPU实现，不过在CPU端局部内存就存放在标准可缓存内存中。所以在CPU端局部内存依旧具有较低的访存延迟。
+
+局部内存非常有用，因为其能提供工作组中的工作项有更高的交互方式。任何分配出来的局部内存都能让整个工作组的工作项访问，因此如果对局部内存进行修改，对组内其他工作也是可见的。局部内存使用\_\allowbreak{}\_\allowbreak{}local标识符修饰，其可以在内核内部进行分配，也可以通过内核参数传入。两种方式的代码如下所示：
+
+\begin{codebox}[cpp]
+__kernel
+void localAccess(
+  __global float *A,
+  __global float *B,
+  __local float *C){
+
+  __local float aLocalArray[1];
+  if (get_local_id(0) == 0){
+    aLocalArray[0] = A[0];
+  }
+
+  C[get_local_id(0)] = A[get_global_id(0)];
+
+  work_group_barrier(CLK_LOCAL_MEM_FENCE);
+
+  float neighborSum = C[get_local_id(0)] + aLocalArray[0];
+
+  if (get_local_id(0) > 0){
+    neighborSum = neighborSum + C[get_local_id[0] - 1];
+  }
+
+  B[get_global_id(0)] = neighborSum
+}
+\end{codebox}
+
+图7.4展示了上述代码的数据流。
+
+\myGraphic{0.92}{images/chapter7/7-4.png}{图7.4 localAccess内核在执行时的数据流}
+
+注意，这里将数据从全局内存中读出，然后(以不可预知的时序)写入两个局部内存数组C和aLocalArray中。不过，在实际硬件上是可以进行预测的，因为可以将对应的模型映射到实际的硬件上。例如，AMD GPU上经常会处理SIMD向量数据，对整个向量的读写操作实际上都会由一个工作项进行。不过，这种特性并非适用各种情况。通常，我们都会插入一个栅栏操作：只有所有工作项到达栅栏时，才能保证所有的数据都从全局内存搬运过来，或是搬运到全局内存上，之后组内所有工作项看到的局部数据就是一致的。越过栅栏之后，如图下半部分所示，数据就能被组内所有工作项使用。
+
+内核代码从词法角度看，aLocalArray只能被当前函数使用，而非整个工作组。这是因为aLocalArray内存空间是在局部内存上开辟，局部内存上的内存就属于整个工作组可见，所以整个工作组所访问到的aLocalArray实际上是同一地址中的数据。因为在到达栅栏之前，只要工作项0对aLocalArray进行了写入，在越过栅栏之后，所有工作项就能直接使用aLocalArray了。
+
+代码中C数组就是通过主机端创建的局部内存。这种方式需要调用运行时API。为了分配内存使用clSetKernelArg()传递局部内存的大小到内核中。通常clSetKernelArg都是传递一个全局内存到内核端，现在这个内存参数需要置为NULL。这种方式意味着不需要全局变量的返回，所以其就为局部内存了。式例如下：
+
+\begin{codebox}[cpp]
+ciErrNum = clSetKernelArg(
+  kernel object,
+  parameter index,
+  size in bytes,
+  NULL)
+\end{codebox}
+
+
+
+% ---- 7.5-chinese.md ----
+\section{私有内存}
+
+私有内存指的是各工作项内自己所使用的变量，也包括内核参数。原则上，私有数据通常放置到寄存器上，不过寄存器的资源并不是那么多，当使用的私有内存过多时，一部分数据将会放置到全局内存中。私有内存的分配会影响内核所使用到的寄存器数量。与局部内存一样，指定的架构中所分配的寄存器数量是固定的。而且，不同架构之间的性能差异也很大。
+
+x86类型的CPU所具有的寄存器数量相当少。不过，因为其缓存较大，一些需要将寄存器上的数据放置到栈上的操作，以及将数据返回寄存器的操作，都会在缓存和寄存器之间交换数据，所以这些操作几乎没有什么延迟。使用寄存器时，需要把使用频率较高的数据放在寄存器上，这样这些变量从作用域中的出入将会变的十分高效。
+
+GPU上就不能这样奢侈的使用缓存。有些设备没有读写缓存，有些有缓存的设备上，缓存也十分有限，因此在寄存器也很有限的情况下，工作项所需要的数据很快会填满缓存，这样将会导致有些数据在再需要的时候，在缓存上未命中。设备上的DRAM被填满时，该设备的性能会急剧恶化。开发应用时，需要尽量避免这种情况的发生。
+
+如果寄存器够用，寄存器对于GPU上大量的激活线程时，其功能与\emph{局部数据共享}(LDS, local data share)的方式很相似(将在第8章进行详细描述)。ADM Radeon HD R9 290X架构中，每个计算单元具有256KB寄存器内存。其有4块(SIMD)寄存器块，每个寄存器块具有256个寄存器，每个寄存器的每个通道能够处理4字节64位宽向量。如果每个工作项使用100个寄存器，那么对于SIMD来说，只能发送出有2波数据，几乎没有什么指令延迟隐藏。而当每个工作项使用49个寄存器时，那么就可以发出5波数据，这样就能很好的隐藏指令延迟。
+
+虽然，数据转移在寄存器中处理起来更加高效，不过这样会消耗掉计算核中的一些线程束，无法进行延迟隐藏，并且这样会导致更多缓存数据交换操作，从而浪费更多GPU计算周期。
+
+
+
+% ---- 7.6-chinese.md ----
+\section{统一地址空间}
+
+之前的OpenCL标准中，编程者常常需要为了不同地址空间的数据写很多版本的OpenCL C函数(其实就是参数中的地址描述符不同)。考虑下，下面两种数据数组，第一个在全局变量中，另一个缓存在局部内存中。两种方式都很简单，对于全局内存指针来说，函数可以直接使用(就像在有自动缓存系统的CPU上使用一样)，另一种就是使用局部内存(GPU会将数组存储在快速便签式内存中)。OpenCL 2.0之前的标准中，要对这两种数组进行同样的操作，就需要将一个函数写两遍，如代码清单7.1所示。
+
+\begin{codeboxt}[cpp]{代码清单7.1 在OpenCl 1.x中，需要对不同的寻址空间定义不同版本的函数}
+void doDoubleGlobal(
+  __global float *data,
+  int index){
+
+  data[index] *= 2;
+}
+
+void doDoubleGlobal(
+  __local float *data,
+  int index){
+
+  data[index] *= 2;
+}
+
+__kernel
+void doubleData(
+  global float *globalData, // the data
+  local float *localData, // local storage
+  int useLocal){ // whether or not to use local memory
+
+  int globalId = get_global_id(0);
+  int localId = get_local_id(0);
+
+  if (useLocal){
+    // copy data to local memroy
+    localData[localId] = globalData[globalId];
+
+    doDoubleLocal(localData, localId);
+
+    globalData[globalId] = localData[localId];
+  } else {
+    doDoubleGlobal(globalData, globalId);
+  }
+}
+\end{codeboxt}
+
+OpenCL 2.0开始，就不需要在这样定义函数了，同样的一个函数，可以通过统一内存地址覆盖所有内存空间。代码参见代码清单7.2。
+
+\begin{codeboxt}[cpp]{代码清单7.2 OpenCL 2.0中使用统一地址空间将7.1中代码重写}
+void doDoubleGlobal(
+  float *data,
+  int index){
+
+  data[index] *= 2;
+}
+
+__kernel
+void doubleData(
+  global float *globalData, // the data
+  local float *localData, // local storage
+  int useLocal){ // whether or not to use local memory
+
+  int globalId = get_global_id(0);
+  int localId = get_local_id(0);
+
+  generic float *data; // generic keyword not required
+  int myIndex;
+
+  if (useLocal){
+    // copy data to local memroy
+    localData[localId] = globalData[globalId];
+
+    // set data to local address space
+    data = localData;
+    myIndex = localId;
+  } else {
+    // set data to global address space
+    data = globalData;
+    myIndex = globalId;
+  }
+
+  doDouble(data, myIndex);
+
+  if (useLocal){
+    globalData[globalId] = localData[localId];
+  }
+}
+\end{codeboxt}
+
+统一地址空间包括全局、局部和私有地址空间。2.0标准中，并未将常量地址划分到同一地址空间中。虽然，常量空间在逻辑上是全局便令的一部分，不过在某些处理器上(特别是图像处理器)，常量数据会映射到特定的硬件单元上，并不能使用指令对其进行动态指定。
+
+
+
+% ---- 7.7-chinese.md ----
+\section{内存序}
+
+对于任何编程语言来说，内存序对于内存模型来说十分重要，需要用一定的顺序来保证线程得到的是期望的结果。当我们使用多线程和共享数据时，内存一致性模型能帮助保证线程得到的是正确的结果。OpenCL需要提供可移植化的高度并行代码，那么内存模型在正式发布的标准文档中就尤为重要。
+
+之前我们提到过，执行内核中的所有工作项都可以访问全局内存上的数据。另外，在同一工作组的工作项可以共享局部内存。直到现在，我们在处理内存时，更多的是使用OpenCL的“松散型”一致模型。对于全局内存，我们没有使用更加复杂的内存模型，并且默认让不同工作组中的工作项更新不同位置的全局内存。关于更新内存对象，我们不能认为和该对象有关的命令状态为CL\_\allowbreak{}COMPLETE时，内存对象更新完成。在实践中，简单的内存模型覆盖了绝大多数的内核。第4章中，我们看到这种内存一致性模型也能支持直方图和卷积相关的应用。
+
+近几年中，C/C++和Java都在支持“获取-释放”操作，为了就是在不使用锁的情况下，进行线程同步。这些操作有助于并行应用中核心代码的处理。OpenCL 2.0在基于C11标准的基础上，也支持“获取-释放”操作。另外，OpenCL的开发者可以将这种问题解决方式扩展到其他类型的应用上，使得支持OpenCL的高级语言可以更加容易进行线程同步。
+
+对于编程者来说，顺序一致模型是最为直观的内存模型。如果系统由顺序一致模型实现，那么各个处理器上的内存操作将会按照程序的执行顺序进行，并且所有处理器上的操作顺序一致。不过，对于顺序一致性模型很难进行优化，因为对程序的正确性没有影响(比如，由编译器重拍指令顺序或在处理器上使用一个存储内存块)。因此，松散的内存模型需要和顺序一致性模型输出一样的结果才算正确。松散序一致性模型需要硬件和软件遵循某些规则，才能得到正确的结果。对于编程者来说，需要花点时间告诉硬件，数据在什么时候才能对其他线程可见。
+
+不过有时同步操作，会成为程序性能的瓶颈。因此，OpenCL提供对应不同类型选项，供同步操作使用(供编程者指定)，每种选项的粒度都有不同的粒度和范围。这些选项称为\emph{内存序}(memory order)和\emph{内存域}(memory scope)。
+
+OpenCL提供三种不同程度的一致性顺序(从弱到强)：松散、获取-释放和顺序。这些选项则由内存序选项指定：
+
+\begin{itemize}
+\item \textbf{松散}(memory\_\allowbreak{}order\_\allowbreak{}relaxed):这种内存序不会对内存序有任何的约束——编译器可以自由的对操作进行重排，包括后续的加载和存储操作。不过该方式可能会带来一些副作用，可能会造成结果错误。2.0之前的OpenCL标准中，原子操作就包含在松散的内存序中。因为缺少限制，所以编程者可能使用松散序获得最好的性能。
+\item \textbf{获取}(memory\_\allowbreak{}order\_\allowbreak{}acquire):获取操作和加载操作成对出现。当为同步操作指定该选项时，任何共享内存需要被其他执行单元(例如，其他工作项，或主机端线程)“释放”后才能进行存储。编译器需要将加载和存储操作移到同步操作之后。
+\item \textbf{释放}(memory\_\allowbreak{}order\_\allowbreak{}release):与获取操作不同，释放操作会和存储操作成对出现。当为同步操作指定释放序时，其会影响同步点之前的存储操作，使其操作对其他线程可见，并且在同步点之前的所有加载操作，必须在达到同步点前全部完成。编译器会将加载和同步操作移至同步点之前。
+\item \textbf{获取-释放}(memory\_\allowbreak{}order\_\allowbreak{}acq\_\allowbreak{}rel):该内存序具有获取和释放的属性：其会在获取到其他执行单元的内存时，释放自己所获取的内存。这个选项通常用于“读改写”操作。
+\item \textbf{顺序}(memory\_\allowbreak{}order\_\allowbreak{}seq\_\allowbreak{}cst):顺序一致性的内存序不存在数据数据竞争[1]。该内存序中，加载和存储操作的执行顺序和程序的执行顺序一致，这样加载和存储操作也就是简单的交错与不同的执行单元中。该选项要比memory\_\allowbreak{}order\_\allowbreak{}acq\_\allowbreak{}rel更加严格，因为最后程序可以说是在串行执行。
+\end{itemize}
+
+当对全局内存进行同步时，指定内存序带来的性能开销，可能要超过计算时的开销。试想一个系统中具有多个设备，共享一个上下文，并且包含一个细粒度的SVM内存。当某个工作项使用释放型同步操作，那么就需要对所有设备上的工作项进行同步——如果不考虑算法的正确性，这将带来很大的性能开销。因此，对于很多操作来说，内存序参数会伴随一个内存域，其限制了指定执行单元可见操作的范围。
+
+可以作为内存域指定的选项如下：
+
+\begin{itemize}
+\item 工作项(memory\_\allowbreak{}scope\_\allowbreak{}work\_\allowbreak{}item):指定内存序要应用到每个工作项中。这里需要对图像对象进行行操作。
+\item 工作组(memory\_\allowbreak{}scope\_\allowbreak{}work\_\allowbreak{}group):指定的内存序应用于工作组中的每个工作项。这个操作与栅栏操作相比，相当于一个轻量级的同步。
+\item 设备(memory\_\allowbreak{}scope\_\allowbreak{}device):指定内存序用于某一个执行设备。
+\item 所有设备(memory\_\allowbreak{}scope\_\allowbreak{}all\_\allowbreak{}svm\_\allowbreak{}devices):指定内存序应用于所有设备上的所有工作项，以及主机端(对细粒度SVM使用原子操作)。
+\end{itemize}
+
+与访问全局内存不同，访问局部内存不需要指定内存域(实际上指定了也会忽略)——局部原子操作通常具有默认内存域memory\_\allowbreak{}scope\_\allowbreak{}work\_\allowbreak{}group。因为局部内存的访问只在同一工作组中存在，所以在外部设置memory\_\allowbreak{}scope\_\allowbreak{}device和memory\_\allowbreak{}scope\_\allowbreak{}all\_\allowbreak{}svm\_\allowbreak{}devices对于局部内存没有任何意义。
+
+\subsection{原子访问}
+
+本章开始时，我们说到OpenCL 2.0支持原子操作。那么就来介绍一下内存序和内存域，这里我们简单的回顾一下原子操作。
+
+回想一下我们介绍过的原子操作，比如：加载、存储和“预取后修改”。我们展示一下“预取后修改”操作的函数声明：
+
+\begin{codebox}[cpp]
+C atomic_fetch_<key>(volatile A *object, M operand)
+\end{codebox}
+
+这里的key可以替换成add、min或max。object参数为一种原子类型的变量的指针，operand代表操作数。返回值C，其类型是非原子的A类型。返回值时object地址中存储的值，这个返回值是没有进行操作前的数值。
+
+上面的描述中，可以认为C/C++和OpenCL 2.0利用原子操作对内存序进行控制。因此，所有的原子操作都具有传入内存序和内存域的原子操作。例如，“预取后修改”函数具有以下函数声明：
+
+\begin{codebox}[cpp]
+C atomic_fetch_<key>_explicit(volatile A *object, M operand, memory_order order)
+
+C atomic_fetch_<key>_explicit(volatile A *object, M operand, memory_order order, memory_scope scope)
+\end{codebox}
+
+通过这样的设计，就可以将线程间同步的任务交给原子操作来完成了。使用原子操作来做的同步的原因：其设置的标识可以让其他线程知道，应该在什么时候对某个区域的内存进行访问。因此，当一个线程想要看到其他线程所修改的内存时，通过对原子操作进行设置一些标志，然后等待共享数据释放。其他线程需要读取对应标志，在条件满足的情况下，将最后更新的数据拷贝到共享内存中。
+
+另外，OpenCL除了支持加载、存储和“预取后修改”类型的原子操作之外，还支持交换、“比较后交换”和“测试后设置”类型的原子操作。这里列出一个“比较后交换”函数的声明：
+
+\begin{codebox}[cpp]
+bool
+atomic_compare_exchange_strong_explicit(
+  volatile A *object,
+  C *expected,
+  C desired,
+  memory_order success,
+  memory_order failure,
+  memory_scope scope)
+\end{codebox}
+
+与之前看到函数声明不一样atomic\_\allowbreak{}compare\_\allowbreak{}exchange\_\allowbreak{}strong\_\allowbreak{}explicit()具有两个内存序参数——success和failure。这两个参数指定的是当比较操作成功和没成功时所使用到的内存序。编程者可以使用这种操作，来控制没有必要同步操作。比如，编程者将memory\_\allowbreak{}order\_\allowbreak{}relaxed传入failure，就是想在条件不成功的时候，不让工作项等待交换完成。
+
+我们之前一直在讨论原子操作如何使用，并没有讨论如何对原子操作进行初始化。OpenCL C有两种方式对原子操作的操作域进行初始化。在程序范围内声明一个原子变量，可以使用ATOMIC\_\allowbreak{}VAR\_\allowbreak{}INIT()宏，该宏的声明如下所示：
+
+\begin{codebox}[cpp]
+#define ATOMIC_VAR_INIT(C value)
+\end{codebox}
+
+这种方式初始化的原子对象是在程序域内进行声明，且分配在去全局地址空间内。例如：
+
+\begin{codebox}[cpp]
+global atomic_int sync = ATOMIC_VAR_INIT(0);
+\end{codebox}
+
+原子变量在内核端需要使用非原子函数atomic\_\allowbreak{}init()进行声明和初始化。注意，因为atomic\_\allowbreak{}init()是非原子函数，但是也不能被多个工作项同时调用。也就是，初始化需要串行且同步的进行，例如下面代码所示：
+
+\begin{codebox}[cpp]
+local atomic_int sync;
+if (get_local_id(0) == 0){
+  atomic_init(&sync, 0);
+}
+work_group_barrier(CLK_LOCAL_MEM_FENCE);
+\end{codebox}
+
+\subsection{栅栏}
+
+栅栏同步操作与内存的位置无关。虽然，实践中我们使用栅栏对工作组进行同步，但是我们从来没有说过栅栏操作如何使用内存序。在OpenCL C中，栅栏操作可以由atomic\_\allowbreak{}work\_\allowbreak{}item\_\allowbreak{}fence()函数执行，其声明如下：
+
+\begin{codebox}[cpp]
+void
+atomic_work_item_fence(
+  cl_mem_fence_flags flags,
+  memory_order order,
+  memory_scope scope)
+\end{codebox}
+
+flags参数可以传入CLK\_\allowbreak{}GLOBAL\_\allowbreak{}MEM\_\allowbreak{}FENCE, CLK\_\allowbreak{}LOCAL\_\allowbreak{}MEM\_\allowbreak{}FENCE和CLK\_\allowbreak{}IMAGE\_\allowbreak{}MEM\_\allowbreak{}FENCE，或将这几个参数使用“位或”(OR)的方式共同传入。共同传入的方式，与单独传入的效果是一样的。
+
+很多系统上图像对象还是限制在非通用显示硬件上。OpenCL标准当然也注意到了这点，所以可向atomic\_\allowbreak{}work\_\allowbreak{}item\_\allowbreak{}fence()传入CLK\_\allowbreak{}IMAGE\_\allowbreak{}MEM\_\allowbreak{}FENCE，来保证图像对象在写之后才可读——即使对同一个工作项。如果有多个工作项要进行同步，然后可以读取同一工作组中前一工作项所写入图像中的数据，最后需要使用CLK\_\allowbreak{}IMAGE\_\allowbreak{}MEM\_\allowbreak{}FENCE作为参数传入work\_\allowbreak{}group\_\allowbreak{}barrier()。另一种特别的方式，可以使用工作项栅栏对局部和全局内存的访问顺序进行统一控制。
+
+之前我们介绍过，使用工作组栅栏和内存栅栏作为同步操作。理论上，这还是两种栅栏操作——就像出入栅栏一样。入栏就是指定标志和作用域释放栅栏。同样的，出栏也需要指定对应的标志和作用域。
+
+\myRefRule
+
+\begin{myRefs}
+
+[1] 多线程/多工作项访问同一变量会产生数据竞争。
+
+\end{myRefs}
+
+
+
+% ---- 7.8-chinese.md ----
+\section{本章总结}
+
+本章我们从OpenCL内核执行的角度(工作项)上了解了内存模型的更多信息。内存包括内存空间，内存类型，以及(标准支持的)不同空间和内存类型的一致性模型。结合第6章所介绍的主机端内存模型，读者现在应该对内存模型有了一定的了解，并且应该知道了OpenCL应用中数据的管理和使用方式。
+
+

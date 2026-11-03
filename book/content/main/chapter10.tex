@@ -1,0 +1,354 @@
+% ============================================================
+%  第10章 OpenCL的分析和调试
+%  源文件：content/chapter10/
+% ============================================================
+
+
+% ---- 10.1-chinese.md ----
+\section{设置本章的原因}
+
+我们写OpenCL程序时，不仅限于编写高性能的内核代码，还要注意其他的一些因素，从而达到加速应用的效果。上一章我们介绍了如何使用目标机器的硬件特性，去优化OpenCL内核代码。一个OpenCL应用可以包含多个内核，以及一系列内存对象(可在主机端和设备端对数据进行搬移)。所以，我们需要对性能进行测试，并且去了解应用的瓶颈。对应用的性能分析有助于我们提高应用的性能，在对性能进行分析时，需要注意一下几点：
+
+\begin{itemize}
+\item 当程序中有多个内核时，哪些内核需要去优化？
+\item 内核在命令队列中等待的时间与实际运行的时间
+\item 了解执行、初始化，以及内核编译在整个应用执行中的时间占比
+\item 主机与设备之间的数据I/O在整个应用执行中的时间占比
+\end{itemize}
+
+弄清楚上面的问题和关系，可以帮助开发者判断该应用是否具有优化的空间。本章我们需要结合调试工具，明确这些信息。
+
+所以，本章我们决定来聊一聊对于OpenCL内核代码的调试。调试并行程序要比调试串行程序复杂很多，因为在并行带程序中存在一些诸如条件竞争这样的非逻辑错误，所以有时候多线程的问题我们是很难发现和复现。
+
+
+
+% ---- 10.2-chinese.md ----
+\section{使用事件分析OpenCL代码}
+
+OpenCL命令队列支持64位的计时命令——使用\texttt{clEnaueueXX()}函数提交，比如:\texttt{clEnqueueNDRangeKernel()}。通常，命令入队都是异步的，并且开发者可以使用事件的方式对命令进行状态追踪。事件对象提供了一种方式来了解命令的执行过程。事件中记录了命令的很多相关信息，比如何时入队、何时提交到设备上、何时开始运行，以及何时执行完成。通过事件的信息获取函数——\texttt{clGetEventProfilingInfo()}，其能提供命令的相关计时信息：
+
+使用事件对象显式的对OpenCL程序进行计，需要对对应的命令队列进行计时使能的操作。在创建命令队列的时候，需要设置CL\_\allowbreak{}QUEUE\_\allowbreak{}PROFILING\_\allowbreak{}ENABLE标识。一旦命令命令队列创建完成，就无法在对事件计时的功能进行开启或关闭。
+
+\begin{codebox}[cpp]
+cl_int clGetEventProfilingInfo(
+  cl_event event,
+  cl_profling_info param_name,
+  size_t param_value_size,
+  void *param_value,
+  size_t *param_value_size_ret)
+\end{codebox}
+
+第一个参数，event事件对象时必须给定的，第二个参数是一个枚举值，用来描述描述所要获取相应的时间信息。具体的值如表10.1所示。
+
+表10.1 对应的命令状态可以用来获取OpenCL事件的时间戳
+
+\par\medskip\noindent
+\begingroup\fontsize{9bp}{12.5bp}\selectfont\renewcommand{\arraystretch}{1.12}
+\begin{center}
+\begin{tabularx}{\textwidth}{XX}
+\toprule
+事件状态 & param\_value返回的信息 \\
+\midrule
+CL\_PROFILING\_COMMAND\_QUEUE & 使用一个64位的值对主机端将命令提交到命令队列的时间进行统计(单位：ns) \\
+CL\_PROFILING\_COMMAND\_SUBMIT & 使用一个64位的值对命令从命令队列提交到相关的设备上的时间进行统计(单位：ns) \\
+CL\_PROFILING\_COMMAND\_START & 使用一个64位的值对命令开始的时间进行记录(单位：ns) \\
+CL\_PROFILING\_COMMAND\_END & 使用一个64位的值对命令完成的时间进行记录(单位：ns) \\
+CL\_PROFILING\_COMMAND\_COMPLETE & 使用一个64位的值对命令及其相关子命令完成的时间进行记录(单位：ns) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\endgroup
+\medskip
+
+如之前所述，OpenCL命令队列是异步工作的，因此函数在命令入队时就返回了。所以在对事件对象进行计时查询时，需要调用一次\texttt{clFinish()}，以同步相关任务，让队列中的所有任务都完成。下面一段简单的代码展示了，如何使用事件的方式对内核进行性能分析。
+
+\begin{codeboxt}[cpp]{代码清单10.1 使用OpenCL事件获取内核的时间信息}
+// Sample code that can be used for timing kernel execution duration
+// Using different parameters for cl_profiling_info allows us to
+// measure the wait time
+cl_event timing_event;
+cl_int err_code;
+
+// !We ara timing the clEnqueueNDRangeKenrel call and timing
+// information will be stored in timing_event
+err_code = clEnqueueNDRangeKernel(
+  command_queue,
+  kernel,
+  work_dim,
+  global_work_offset,
+  global_work_size,
+  local_work_size,
+  0, NULL, &timing_event);
+
+cl_ulong starttime, endtime;
+
+err_code = clGetEventProfilingInfo(timing_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &starttime, NULL);
+kerneltimer = clGetEventProfilingInfo(timing_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &endtime, NULL);
+unsigned long elapsed = (unsigned long)(endtime - starttime);
+printf("Kernel Execution\t%ld ns\n", elapsed);
+\end{codeboxt}
+
+
+
+% ---- 10.3-chinese.md ----
+\section{AMD CodeXL}
+
+之前的章节我们提到过，如何使用OpenCL API获取OpenCL命令的一些计时信息。下面的小节中我们就来了解一下，使用AMD的CodeXL，如何进行性能分析，以及如何调试OpenCL程序。CodeXL在AMD开发者论坛中是一款大家比较喜爱的工具，其能在AMD平台上对OpenCL应用进行性能评估和调试。
+
+CodeXL可以在多种模式下操作，开发者可通过不同的模式对OpenCL程序进行观察。基本模式下，CodeXL可以作为分析器、调试器，以及内核静态分析工具使用。CodeXL的主要功能在这里进行简答的介绍：
+
+\begin{itemize}
+\item 性能分析模式：CodeXL对OpenCL应用进行功能性的性能分析。CodeXL会将OpenCL运行时数据和AMD Radeon GPU执行的数据汇总。
+\item 内核静态分析模式：CodeXL可以视为一个静态分析工具，可以对OpenCL内核的编译、解析和汇编进行分析。这种模式下CodeXL也可以作为内核的原型工具。
+\item 调试模式：CodeXL可以用来调试OpenCL应用。CodeXL允许开发者对OpenCL内核源码和运行时API进行单步调试。这个模式下也可以观察函数参数，从而减少内存消耗。
+\end{itemize}
+
+CodeXL的使用方式有两种：
+
+\begin{enumerate}
+\item Visual Studio插件：CodeXL可以对当前激活的解决方案进行分析。只需要在菜单栏找到插件，并使用插件运行程序即可进行调试。
+\item 独立使用：CodeXL也可以作为一个独立的软件，安装在Windows和Linux系统下。独立的软件使用方式有一个好处，就是不需要加载那么多的源文件。开发者只需要建立对应的CodeXL工程，并设置应用二进制文件的路径，命令行参数和内核源码所在位置即可。
+\end{enumerate}
+
+CodeXL的三种模式都可以在插件或独立软件中完成。读者需要在\href{http://developer.amd.com}{AMD的开发者网站}下载CodeXL。后面的章节我们将以CodeXL 1.5作为式例。读者也可以根据软件所带的使用指南熟悉最新版本CodeXL的特性。
+
+
+
+% ---- 10.4-chinese.md ----
+\section{如何使用AMD CodeXL}
+
+性能分析模式下，CodeXL可以作为性能分析工具将OpenCL运行时和AMD GPU执行时的数据汇总在一起。我们可以通过这种方式找到应用的瓶颈所在，并且找到最佳的方式在AMD平台上对应用性能进行优化。在这之后，我们将性能分析模式下的CodeXL称为\emph{分析器}(profiler)。
+
+为了在Visual Studio中使用CodeXL插件，只需要简单的将解决方案导入Visual Studio即可。通常，CodeXL事件浏览窗口和Visual Studio解决方案窗口停靠在一起。再将某一个C/C++工程设置为启动工程，并且在CodeXL菜单栏中选定Proflie Mode。这个模式可以获取到的信息如下所示：
+
+\begin{itemize}
+\item GPU应用时间线轨迹
+\item GPU在执行内核时的性能计数
+\item 收集CPU在执行时的性能信息
+\end{itemize}
+
+菜单栏中，我们可以收集一个应用的时间线轨迹或GPU性能计数器。当应用完成执行，分析器会对收集到的信息进行处理，然后在界面上进行显示。CodeXL独立运行时也可以完成该功能，可以通过一个命令工具——sprofile(在CodeXL的安装路径下)。使用sprofile的方式不需要加载源码，只需要执行对应的二进制文件即可。
+
+每一次执行对于分析器来说都是一个新的任务，所以分析器会将其分为多个任务。图10.1中展示了具有三个任务的CodeXL分析器。
+
+\myGraphic{0.92}{images/chapter10/10-1.png}{图10.1 CodeXL分析模式下的任务。两个任务获取的的是应用时间线，另一个获取的是GPU计数器}
+
+\subsection{OpenCL应用的跟踪信息}
+
+OpenCL跟踪链表中的信息都是有关OpenCL API的调用。对于每次的API调用，分析器都会记录其输入参数，以及输出结果。另外，分析器同时也记录了CPU上代码的时间戳和OpenCL运行时的时间戳信息。输出数据记录在一个文本格式的文件中，称为应用性能跟踪文件。
+
+对于OpenCL程序的跟踪对于理解复杂程序的高级框架是十分有帮助的。OpenCL应用的跟踪数据可助我们了解如下信息：
+
+\begin{itemize}
+\item 通过时间线的角度，我们可以了解应用的高级架构。并且，可以确定应用中创建的OpenCL上下文数量，以及命令队列创建的数量和其在应用中的应用。内核执行和数据传输操作的时间也在时间线上可见。
+\item 总结页面可以帮助我们了解，当前应用的瓶颈是否在内核执行或数据传输上。我们找到最耗时的10个内核和数据传输操作，以及API调用(调用次数最多的API或执行最耗时的API)。
+\item 可以通过API跟踪的页面，来了解和调试所有API的输入参数和输出数据。
+\item 查看警告，并尝试使用最佳的方式调用OpenCL API。
+\end{itemize}
+
+应用的时间线(如图10.2所示)提供了应用在执行时的甘特图。最顶部的时间线是时间格，用来表示该应用总体的耗时情况。其计时的方式是以第一次OpenCL的调用作为起始，最后一个OpenCL调用作为结束。下面的时间线中，主机端线程对OpenCL的调用都展示在事件先中。对于每个主机端线程，OpenCL API调用都会在甘特图中绘制成一个单独的时间格。
+
+\myGraphic{0.92}{images/chapter10/10-2.png}{图10.2 Nbody应用在CodeXL性能分析模式下的时间线。我们能看到数据传输和内核运行的耗时情况。}
+
+下面的主机线程中，OpenCL树展示了所有创建的上下文和命令队列，以及数据传输操作和每个命令队列中的内核执行事件。我们可以对事件线进行缩放、平移、折叠和展开，或选择一段感兴趣的区域。我们也可以通过相关的API调用，看到API的时间格，反之亦然。时间线另外一个很实用的功能是，右键点击对应的API，可以显示该API在源码中的位置。
+
+用时间线对于调试OpenCL应用十分有用。下面介绍一下时间线所带来的好处：
+
+\begin{itemize}
+\item 你需要确定你应用中的外部框架是否正确。通过测试时间线，你可以确定队列和上下文对象的创建，与你的期望是否一致。
+\item 可以增加对同步操作的信心。例如，当内核A需要依赖一个内存操作，并且这个内存的数据来源于内核B，那么内核A就应该出现在内核B之后的时间线中。通过传统的调试方式，我们很难找到同步所引发的错误。
+\item 最后，你可以了解到应用是利用硬件是否高效。时间线展示了同时执行的独立内核和数据传输操作。
+\end{itemize}
+
+\subsection{跟踪主机端API}
+
+主机端API跟踪展示(如图10.3)，列出了每个主机线程调用OpenCL API的情况。这里我们使用AMD OpenCL SDK中的Nbody应用作为测试用例。每个调用过OpenCL API的线程都会展示在表中。
+
+\myGraphic{0.92}{images/chapter10/10-3.png}{图10.3 Nbody应用在CodeXL性能分析模式下对API调用的跟踪}
+
+主机API跟踪包含一系列主机线程对OpenCL API的调用。对于每一次调用，列表中都会用相应的索引(根据执行顺序)进行表示，API函数的名称，传入参数和返回值都会进行记录。当要了解传入的参数时，分析器就会尝试去解应用指针、反编码枚举值等方式，给开发者提供尽可能多有用的信息。双击主机API，就可以看到对应API在主机线程中对应时间线的位置。
+
+主机API跟踪允许我们对每个API的输入和输出结果进行分析。例如，可以简单查询所有API是否都返回了CL\_\allowbreak{}SUCCESS，或对应的数组对象是否使用正确的标识进行创建。这里我们也可以看到冗余的API使用。
+
+\subsection{总结页面信息}
+
+应用跟踪事件时间线同样也提供对OpenCL应用的性能总结。通常，会告诉我们应用的瓶颈所在。总结页面在每个CodeXL分析器中都有，可以通过打开对应的界面看到。总结页面的主要汇总信息介绍如下：
+
+\begin{itemize}
+\item \textbf{API总结页面}：页面展示了主机端调用的所用OpenCL API
+\item \textbf{上下文总结页面}：页面统计了每个上下文对象上的所有内核和数据传输操作，也展示了数组和图像对象创建的个数。
+\item \textbf{内核总结页面}：页面统计了应用所创建的所有内核。
+\item \textbf{10个最耗时数据传输操作的总结页面}：页面将数据传输操作耗时进行排序，展示10个耗时最长的数据传输操作。
+\item \textbf{10个最耗时内核的总结页面}：页面将内核执行耗时进行排序，展示了10个耗时最长的内核。
+\item \textbf{警告/错误页面}：展示应用可能存在的问题。其能为未释放的OpenCL资源、OpenCL API失败的调用，以及如何改进能获取更优的性能。点击相关OpenCL API的超链接，就能看到相应API的一些信息。
+\end{itemize}
+
+上下文总结表中，就能看到内核执行或数据传输是如何限制应用的性能。如果应用的性能瓶颈在于数据传输，那么就意味着有大量数据尽心传输(读、写、拷贝或映射)。之后我们可对相关算法进行分析，看是否能减少相应的数据传输。总结页面中的时间线可以帮助我们了解，应用的执行过程中，是否使用了最高效的数据传输方式——同内核执行并发执行。
+
+如果应用的瓶颈在于内核执行，就要看一下哪个内核的耗时过长。如果确定了对应的内核，将可以通过GPU执行的性能数据，对该内核的瓶颈进行具体分析。
+
+\subsection{GPU内核性能计数}
+
+API跟踪只提供时间戳信息，通过时间戳我们可以得到内核执行的时间。其不会告诉我们内核中的性能瓶颈在哪里。当我们使用跟踪数据发现哪个内核需要优化时，我们可以收集相关内核在GPU设备上的执行信息。
+
+GPU内核性能计数器可以用来在内核执行时，发现内核可能存在的瓶颈。这些数据可以提供给开发者，让开发者来确定具体的瓶颈。AMD Radeon GPU支持性能计数器，GPU是否支持性能计数器的信息可以在CodeXL的文档中找到。
+
+\myGraphic{0.92}{images/chapter10/10-4.png}{图10.4 CodeXL分析器展示了Nbody内核在GPU上执行的性能计数情况}
+
+图10.4中展示了Nbody内核GPU上的性能计数情况。使用性能计数器，我们可以做下面的事情：
+
+\begin{itemize}
+\item 决定内核所需要分配的资源数量(通用寄存器，局部内存大小)。这些资源会受到正在GPU中运行的波面阵的影响。可以分配较高的波面阵数量来隐藏数据延迟。
+\item 决定在GPU运行指令时，所要是用ALU的数量，以及全局和局部内存的数量。
+\item 可以了解缓存的命中率，以及写入或读取全局内存中的数据量。
+\item 决定使用相应的向量ALU单元和内存单元。
+\item 了解任意局部内存(局部共享数据)的块冲突，SIMD单元尝试读取或写入同一个局部共享数据的相同位置，这样导致访存串行化，并且增加访问延迟。
+\end{itemize}
+
+输出数据记录在一个csv(comma-separated-variable)格式的文件中。你可以点击相应的内核名称，进入“Method”列找到OpenCL内核源码，AMD中间码(IL，Intermediate language)，以及GPU指令集(ISA)，或是内核的CPU汇编代码。根据图10.4中的信息，我们可以尝试对内核性能进行优化。例如，尽管有大量的向量指令(626723每工作项)，没有分支(VALU利用率100\%)，对应矢量ALU在执行的时候也只有59\%的使用率。每个工作项只有两个获取指令，所以内核中不可能被内存访问所限制，所以原因可能是缓存的命中率过低。这就解释了为什么矢量ALU使用率低下的原因。重构代码当然是一个不错的选择，不过工作量有点大，也可以尝试增加波面阵的数量，用来掩盖缓存未命中的延迟。这两种选择都可以对应用进行优化。
+
+\subsection{使用CodeXL对CPU性能进行分析}
+
+CodeXL也提供了很多CPU分析方式。CodeXL对CPU代码的分析是通过基于指令的采样，或是基于时间的采样获得。CPU性能数据有助于开发者对分支、数据访问、指令访问和L2缓存的行为进行了解，从而进行研究。
+
+本章着重是告诉OpenCL开发者如何使用CodeXL，如果读者想要了解CodeXL对CPU的分析详情，可以阅读最先版本的CodeXL的用户指南。用户指南的获取地址为：\texthref{http://developer.amd.com/tools-and-sdks/opencl-zone/codexl/} \href{http://gpuopen.com/compute-product/codexl/?webSyncID=dcc7dd2d-c047-1d25-0893-e75291622902\&sessionGUID=9a4a8d26-e132-c584-67b8-e88956971a45}{译者注：书中的地址已经404，[新地址}]
+
+
+
+% ---- 10.5-chinese.md ----
+\section{使用CodeXL分析内核}
+
+分析模式下，CodeXL可以当做静态分析工具使用。AMD显卡上，分析模式可以用来编译、分析和反汇编一个OpenCL内核。分析模式可选择界面方式和命令行方式。在这之后我们就称CodeXL为“内核分析器”。内核分析器也可以通过命令行使用，在CodeXL安装目录下，有一个CodeXLAnalyzer.exe，可以直接在命令行中执行。
+
+内核分析器是一个离线编译器，还是一个分析工具。其能将内核源码编译成任意支持的GPU(需要驱动支持)上可执行的二进制文件。为了使用内核分析器，AMD OpenCL运行时需要提前在系统中安装好。为了对OpenCL内核进行静态分析，内核必须由内核分析器编译。为了使用内核分析器编译内核，只需要将OpenCL内核源码放置在CodeXL的主窗口内(如图10.6所示)即可。内核分析器可以带来以下一些收益：
+
+\begin{enumerate}
+\item 使用OpenCL内核源码：内核分析器不需要编译主机端源码，只需要编译OpenCL内核即可，其对于OpenCL内核源码来说，是一个很有用的工具。内核分析器包含一个离线编译器，这个编译器可以编译和反汇编OpenCL内核，并且通过分析工具能看到内核的ISA码。编译中出现的错误将出现在输出界面中。当不同的GPU设备支持不同的OpenCL扩展和内置函数时，内核分析器可以对内核进行检查，看其是否能在不同的GPU设备上编译通过。
+\item 生成OpenCL二进制文件：通常开发者不会希望将自己的内核源码进行发布。在这种情况下，OpenCL内核会以二进制文件和主要执行库或可执行文件一起发布。同样，OpenCL API也能对内核进行编译，并且保存成二进制文件。生成的二进制文件，只能用于同一平台上的设备。内核分析器命令行方式也可以生成二进制内核文件，用户使用这个工具可以生成AMD平台上支持的二进制内核。另外，内核分析器将一些选项的设置在内核二进制ELF文件中的某些字段中。这样就能避免以源码的形式发布内核了。这个二进制文件中只包含了ISA或LLVM的中间码，或源码。OpenCL内核二进制中不同字段所扮演的角色不同： · ISA字段：如果开发者要包含一种特殊GPU设备的ISA码在二进制内核中，那么就要为其他OpenCL设备重新生成相应的二进制内核。 · LLVM IR字段：OpenCL二进制俄日那劲中的LLVM IR(或AMD IL)都支持大部分AMD设备。在OpenCL运行时，会将IR翻译成对应GPU的ISA。
+\item 预先对内核的性能进行评估：因为每个内核都能相对于主机端代码单独执行。这样就不需要知道太多OpenCL程序实现的细节。从而，能根据目标机器的信息对内核提前进行性能评估。
+\end{enumerate}
+
+内核分析器载入内核源码时，内核分析器可以只构建OpenCl内核，并且完成对该内核的分析。执行\texttt{build and Analyze}这步时，内核分析器会展示一些Graphics IP版本号(如图10.5所示)。每一个Graphics IP版本都会展示相应的AMD IL和GPU ISA代码(如图10.6所示)。
+
+\myGraphic{0.92}{images/chapter10/10-5.png}{图10.5 AMD CodeXL的分析模式。NBody中OpenCL内核在不同版本的图像架构下的不同中间码展示。}
+
+\myGraphic{0.92}{images/chapter10/10-6.png}{图10.6 内核分析的ISA显示页面。NBody OpenCL内核在多个GPU架构下编译。对于每个GPU架构，AMD IL码和GPU ISA码都可以进行评估。}
+
+下一节中，将会展开上面的内容，继续介绍内核分析器，并且也会讨论分析内核IL和ISA代码的好处。内核分析器包括了ISA页面显示，统计显示和分析显示页面。
+
+\subsection{内核分析器的统计和ISA码展示页面}
+
+与X86的ISA相同，GPU的ISA也是一段很复杂的指令队列。有时这些代码对于非常牛X的开发者来说，也很难读懂。不过，内核分析器基于高阶分析所产生的GPU ISA码，可在应用早期阶段帮助OpenCL应用开发者提升应用性能。为指定设备进行内核优化时，通常就会对ISA码进行分析。了解ISA码的益处，如下所示：
+
+\begin{itemize}
+\item 可以看到使用了多少通用寄存器，并且了解使用的寄存器数量是否会过多。要是过多的话，应用就会使用全局内存来替代这些寄存器，从而造成访存的高延迟。寄存器使用的统计有助于我们对内核代码进行重构，从而减少或复用一定数量的通用寄存器，或者更多的使用局部内存。
+\item 可以看到不同的显卡架构，ISA指令中进行了不同次数的读取和存储，这些指令使用的数量，对于开发者来说是可控的。在了解指令数量之后，可以尽可能减少每个工作项读取或存储数据的尺寸。
+\item 可以通过类似循环展开的方式观察生成ISA码有和不同，从而达到优化的目的。而且开发者可以了解OpenCL的一些内置函数(比如原子操作)是如何进行实现的。
+\end{itemize}
+
+这样就可以通过分析ISA码，对OpenCl内核源码进行优化。优化之后的内核代码可使用内核分析器生成ISA代码，观察相应的分支是出现了，还是消失了。不过这种方式很那将OpenCL源码与ISA码关联到一起。开发者可以选择使用\texttt{-O0}作为内核分析器的编译选项，不让编译器对OpenCL内核进行任何的优化。
+
+内核分析器的统计界面，如图10.7所示。统计页面可以帮助开发者了解OpenCL内核使用了多少资源。AMD OpenCL编译器会将OpenCL内核所要使用GPU资源进行记录。当每个计算单元上的波面阵数量确定，那么内核就会使用占用的方式使用对应资源。现代AMD GPU可以在每个SIMD单元上并发执行10个波面阵，从而能够很好的隐藏延迟。计算单元上波面阵数量的分配也是要根据相应的资源(局部内存，矢量和标量寄存器)进行。NBody中内核占用的资源如图10.7所示。我们可以看到Nbody内核被计算单元中的向量寄存器所限制。
+
+\myGraphic{0.92}{images/chapter10/10-7.png}{图10.7 内核分析器中对于NBody内核的统计显示。我们可以看到并发波面阵的数量，其分配数量被向量寄存器的数量所限制。}
+
+\subsection{内核分析器的分析界面}
+
+内核分析器的统计和ISA页面，都能可以同时展示IL码、ISA码和OpenCL内核源码。
+
+内核分析器包含了一个OpenCL内核分析页面。在分析界面中可以加载每次任务中的所有内核。分析页面会计算出OpenCL内核运行的近似时间。该时间是通过对目标设备进行仿真后，运行得到的。
+
+\myGraphic{0.92}{images/chapter10/10-8.png}{图10.8 对NBody应用的内核分析界面。对于不同框架的GPU，进行相应的性能评估。}
+
+OpenCL内核运行仿真时间如图10.8所示。内核分析器会对OpenCL内核进行评估。当内核分析器无法使用输入数据执行时，其会取推断有多少循环和分支需要执行，并且推断需要执行多少次。推断方式描述如下：
+
+\begin{itemize}
+\item \textbf{全真}：所有线程的分支状态为真——进入设计好的标签内。
+\item \textbf{全假}：所有线程的分支状态为假——执行下一个分支。
+\item \textbf{皆有}：一些线程的分支状态为假——执行所有分支。这样有些进入"else"分支的语句就完全不起作用。
+\end{itemize}
+
+内核分析器就是通过以上的方法对OpenCL内核，进行耗时评估的。图10.8展示了对NBody内核在不同架构GPU上的评估。“True”、“False”和“Both”列展示了每中类型的推断，这些推断可以用来评估OpenCL内核运行时间的上限和下限。
+
+另外，分析界面也提供统计，比如：需要执行多少向量和标量指令，标量获取指令的数量。对于开发者来说，这些统计对于应用的性能评估很有帮助；对于是那些没有特定GPU设备的开发人员来说，这样无疑是在开发时的一种解脱。
+
+
+
+% ---- 10.6-chinese.md ----
+\section{使用CodeXL调试OpenCL内核}
+
+之前章节中，我们已经了解了如何对我们的OpenCL内核源码进行优化。不过，优化的前提是程序运行结果必须是正确的。通常，调试并行程序就已经很困难了，现在需要对使用异构设备的程序进行调试，这无疑是难上加难。
+
+OpenCL中，开发人员只需要调用相关的API，不需要知道平台底层是如何进行实现。调试器让平台底层实现以“白盒”的方式展示给开发者，开发者可以清晰的了解到，每个命令对于并行计算系统的影响。这种方式可以帮助开发者找到错误使用OpenCL的地方，以及是否是在对应平台上的优化所带来的问题。本节，我们将来了解一下，如何使用CodeXL在异构下进行调试。在调试模式下，CodeXL可以作为OpenCL和OpenGL的调试器，以及内存分析工具。其能帮助开发者找到应用中的错误，优化OpenCL的性能，以及优化内存的使用。
+
+\myGraphic{0.92}{images/chapter10/10-9.png}{图10.9 以抽象层级的方式展示了CodeXL和OpenCL应用间的互动关系。}
+
+图10.9展示了一个简单的的层级结构，其描述了CodeXL如何在调试模式下，和OpenCL设备进行互动。这里会展示一些比较重要的模块或组件。CodeXL会截获应用和OpenCL \emph{可安装客户端驱动}(ICD, Installable client driver)。这就使能了CodeXL对OpenCL API调用的记录、所有OpenCL对象记录，以及汇总了这些对象上所携带的数据。下面的章节中，我们将简要了解一下CodeXL调试的能力，以及在调试模式下如何使用CodeXL。下面我们就简要的介绍一下CodeXL的调试模式。
+
+之前说过，异构应用有两部分不同的代码构成：
+
+\begin{enumerate}
+\item API级别的代码(比如，clCreateBuffer(), clEnqueueNDRangeKenrel())。这些调用执行在主机端。
+\item OpenCL命令，包括设备执行和数据传输。
+\end{enumerate}
+
+CodeXL允许开发者使用断点的方式(主机端和设备端皆可)的方式调试OpenCL应用。我们这里简要了解一下CodeXL如何进行主机端代码和内核的调试。
+
+\subsection{API级别调试}
+
+我们先用NBody作为一个例子，来了解一下如何进行API级别的调试。为了进行API级别的调试，CodeXL必须先切换到调试模式。API级别的调试中，CodeXL可以看到每个API运行时所传入的参数。API级别的调试具有如下的一些特性：
+
+\begin{itemize}
+\item \textbf{API函数断点}：CodeXL可以设置断点，断点设置和使用的方式与其他常用调试器相同。
+\item \textbf{记录OpenCL API调用情况}：调试模式会让应用暂停执行，CodeXL会给我们展示在之前的运行过程中的最后一次OpenCL API的调用情况。图10.10展示了CodeXL作为调试器回溯该应用中所使用到的OpenCL命令。
+\item \textbf{程序和内核信息}：OpenCL上下文对象包含多个程序对象和内核对象。CodeXL可以验证哪些程序对象与哪个上下文对象相关联。如果程序是使用\texttt{clCreateProgramWithSource()}创建，我们还可以看到传入到该函数的内核源码。
+\item \textbf{图像和数组对象数据}：一个OpenCL上下文对象中包含多个数组对象和图像对象。CodeXL也可以让开发者直接查看这些对象中的数据。对于图像类型，CodeXL允许我们以图像的角度来查看图像对象中的数据。
+\item \textbf{内存检查}：CodeXL可以让我们了解对应上下文对象的数组对象中内存内存使用情况。内存检查功能可以用来检查内存泄漏，因为在设备端内存不能直接被查看到，所以要查到相关问题会非常的困难。
+\item \textbf{API使用统计}：CodeXL展示了当前选择的上下文对象中的统计的API使用信息。通过分解API在上下文中的调用，我们就能知道一个函数被调用了多少次。
+\end{itemize}
+
+\myGraphic{0.92}{images/chapter10/10-10.png}{图10.10 CodeXL对于OpenCL程序进行API调用的回溯。}
+
+\subsection{调试内核}
+
+CodeXL可以在运行时对OpenCL内核进行调试，可以检查每个工作项对应变量的值，以及工作组中对应变量的值，还可以查看到内核调用堆栈等信息。CodeXL有几种方式可以进行对OpenCL应用进行调试：
+
+\begin{enumerate}
+\item \textbf{OpenCL内核断点}：开发者可以在内核源码文件上进行断点设置。
+\item \textbf{进入式调试}：开发者可以通过单步进入式调试的方式，直接从相关\texttt{clEnqueueNDRangeKernel()}函数进入相关内核中去。
+\item \textbf{内核函数断点}：可以在断点对话框中添加相应的内核函数名作为函数断点。当内核运行匹配到相应函数名时，对应内核开始执行，调试结束是在内核函数开始运行的时候(这个也就是用来观察内核调用顺序，如果不在内核内部设置断点，调试过程是无法进入内核内部的)。
+\end{enumerate}
+
+图10.11展示了OpenCL内核在调试时的窗口状态。在调试OpenCL应用时，需要持续的跟踪大量工作项的状态。一个内核通常会在一个GPU设备上启动成千上万个工作项。CodeXL可以帮助开发者聚焦于对应的工作项，并展示对应工作项中变量的值。
+
+CodeXL也会提供一个统一的断点对话框，可让开发者看到调试描述下所有的断点(包括API和内核)，以及可以通过"Add/Remobe Breakpoints"选项对断点进行添加或删除。在对话框中，开发者也能对CodeXL进行配置，让其自动断在任意一次OpenCL API的调用处。
+
+\myGraphic{0.92}{images/chapter10/10-11.png}{图10.11 对NBody内核设置断点}
+
+\emph{多角度观察——在内核调试时查看数据}
+
+CodeXL允许我们在内核中设置断点，并且单步对内核进行调试。这样就可以帮助我们确定，对应的内核是否按照我们的想法进行操作。不过，为了写出正确的程序，能看到输入和输出，以及内核执行时的中间数据，对于调试来说也很重要。调试器就提供了多个监视窗口，对数据进行观察。
+
+图10.12展示了多个监视窗口的模式。我们可以看到，多观察窗口允许我们观察全局内存中的数据。其也提供观察图像对象的选项。多个窗口方便我们观察多个工作项中的变量。
+
+\myGraphic{0.92}{images/chapter10/10-12.png}{图10.12 多监视窗口可以展示全局内存的值。图像对象中的数据也可以通过该方式进行查看}
+
+
+
+% ---- 10.7-chinese.md ----
+\section{使用\texttt{printf}调试}
+
+OpenCL C内核语言也实现了C语言中著名的printf()函数。printf()函数也可以用来进行调试，这种调试方式对于C/C++开发者来说并不陌生。
+
+当内核调用完成时，设备会执行所有调用的printf()对输出流进行刷新。对命令队列使用clFinish()能将所有入队内核中的printf()进行执行，打印出对应变量的信息。这里需要注意的是，和多线程程序一样，printf()打印出来的信息并不是顺序的。
+
+OpenCL-C标准文档中说明，OpenCL-C与C99标准的实现由所不同。
+
+
+
+% ---- 10.8-chinese.md ----
+\section{本章总结}
+
+本章中我们简单介绍了一个OpenCL开发工具。我们也了解了如何通过OpenCL事件对象获取命令相应状态的时间。我们也了解了CodeXL如何在性能分析模式下，进行性能优化。我们也了解了如何通过CodeXL的分析模式对OpenCL内核源码进行简要的分析，可以不通过主机端代码对当前内核进行初步的性能评估。还有，如何对OpenCL API调用和内核的调试。
+
+

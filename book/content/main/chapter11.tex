@@ -1,0 +1,713 @@
+% ============================================================
+%  第11章 高级语言映射到OpenCL2.0 —— 从编译器作者的角度
+%  源文件：content/chapter11/
+% ============================================================
+
+
+% ---- 11.1-chinese.md ----
+\section{简要介绍现状}
+
+高级编程语言和领域专用语言，通常都能从异构计算中获益。并且，编译器作者们不需要去处理这些供应商提供设备间的错综复杂的关系，以及为特定平台生成对应的代码。另外，OpenCL本身提供目标编译器，并且通过编译器编译可移植的代码，编译器的指定则由运行时管理。通过指定OpenCL目标平台，编译器作者会聚焦在实现更加重要和高级的问题上。这样只专注于对应的平台，会异构计算(高级编程语言)提升其能力。
+
+本章我们将使用\texttt{C++ AMP}(Accelerated Massive Parallelism)，作为\texttt{C++}的并行编程扩展。本章中用一个例子来展示在高阶编程模型下，OpenCL代码所产生代码的效率。\texttt{C++}语言有很多高级和对编程者友好的特性，不过这些特性在OpenCL中消失了。这些高级的特征在软件工程实践中也被支持，并且这些特征被证明能提高开发者的效率。那么编译器作者的任务就是将这些特性通过OpenCL构建，而不会有太多的性能损失。我们在代码翻译过程中，目前使用了一些很重要的实现技巧；对于编译器作者来说，会将OpenCL的编程模型与其他编程模型相对应，这对于实现编译器来说是十分重要的。
+
+我们将从一个简单的\texttt{C++ AMP}例子开始，一个简单向量相加的例子，并且运行这个字。通过这个例子，我们会将一些\texttt{C++ AMP}特性映射到OpenCL上(之后的章节会介绍)。实际上，其实现包含一个编译器，一系列头文件，还有一个运行时库，这个实现是作为一个\href{https://bitbucket.org/multicoreware/cppamp-driver-ng/}{开源项目}，可以被任何人访问。(该库已经转移到\href{https://bitbucket.org/multicoreware/hcc/overview}{这里})
+
+
+
+% ---- 11.2-chinese.md ----
+\section{简单介绍C++ AMP}
+
+\texttt{C++ AMP}是一个编程模型，可将\texttt{C++}实现的算法数据并行化。与OpenCL和CUDA C比起来，\texttt{C++ AMP}封装了很多底层的细节，包括数据转移之类的，这样会然改程序看上去更加整洁。\texttt{C++ AMP}还是包含了非常多的特性，能让编程者在错综复杂的系统中进行性能加速。
+
+因为\texttt{C++ AMP}的标准是开源的，所以可以有很多不同的实现。我们这里所使用的\texttt{C++ AMP}基于开源Clnag和LLVM编译器，多核(MulticoreWare)公司发布了\texttt{CLamp}——GPU上使用OpenCL实现的\texttt{C++ AMP}。其可以在Linux和Mac OS X上运行，并且能支持大多数不同供应商的GPU卡，比如AMD、Intel和NVIDIA。
+
+\texttt{C++ AMP}已经作为\texttt{C++11}标准的一个扩展。添加了一些标准头文件，这些头文件中定义了一些已经模板化的数据并行算法，还另外的为\texttt{C++}编程语言添加了两条规则。第一条：添加的函数限定于运行在GPU上；第二条：允许GPU线程共享数据。本章并不是要对\texttt{C++ AMP}进行详细的介绍。我们会主要关注\texttt{C++ AMP}一些重要的核心特性，并且介绍一个\texttt{C++ AMP}编译器是如何使用OpenCL实现这些特性的。如果有读者对\texttt{C++ AMP}本身很感兴趣，微软已经发布了一本关于\texttt{C++ AMP}的书籍[1]，可以作为\texttt{C++ AMP}的入门。
+
+下面让我们通过一个向量相加的例子，来了解一下\texttt{C++ AMP}:
+
+\begin{codeboxt}[cpp]{图11.1 \texttt{C++ AMP}代码示例——向量相加}
+#include <amp.h>
+#include <vector>
+
+using namespace concurrency;
+
+int main(void){
+  const int N = 10;
+  std::vector<float> a(N);
+  std::vector<float> b(N);
+  std::vector<float> c(N);
+
+  float sum = 0.f;
+  for (int i = 0; i < N; i++){
+    a[i] = 1.0f * rand() / RAND_MAX;
+    b[i] = 1.0f * rand() / RAND_MAX;
+  }
+
+  array_view<const float, 1> av(N, a);
+  array_view<const float, 1> bv(N, b);
+  array_view<float, 1> cv(N, c);
+
+  parallel_for_each(cv.get_extent(),
+        [=](index<1> idx)restrict(amp){
+            cv[idx] = av[idx] + bv[idx];
+        });
+  cv.synchronize();
+  return 0;
+}
+\end{codeboxt}
+
+向量相加的原理图，如图11.2所示：
+
+\myGraphic{0.92}{images/chapter11/11-2.png}{图11.2 向量相加的原理图}
+
+图11.1的第1行包含了\texttt{C++ AMP}的头文件——amp.h，该头文件了包含了核心特性的声明。\texttt{C++ AMP}类和函数都属于\texttt{concurrency}命名空间。使用“using”的方式可以让我们在这段简单的代码中，不用为相应的函数加上前缀\texttt{concurrency::}。
+
+主函数在第4行，其启动了一个主机线程，该线程包含一段已加速的数据并行计算。\texttt{C++ AMP}中的“主机”这个术语的意思和OpenCL是一样的。不过，在OpenCL中还存在“设备”的概念，也就是帮助主程序加速的执行设备，而在\texttt{C++ AMP}中使用“加速器”这一概念来表述。\texttt{C++ AMP}其中的一个高级特性就是支持Lambda表达式，Lambda的使用可以让主机和加速器的代码放在一起，甚至放在同一个函数中。所以在\texttt{C++ AMP}中就几乎没有主机和加速器代码之分。后面将会介绍，编译器如何将\texttt{C++ AMP}中的Lambda编译到OpenCL上下文中。
+
+\subsection{C++ AMP array\_view}
+
+\texttt{C++ AMP}中，类模板array\_\allowbreak{}view作为数据读写的传媒。一个array\_\allowbreak{}view对象是一个多维的数据集合。这种方式并不是将已有数据拷贝到一个新的位置，而是使用一种新的方式去访问原始数据所在的地址。模板有两个参数：数据的类型和数据的维度。通过不同维度上的索引，可以访问到不同等级的类型或对象。本例中，我们使用了1维，数据类型为float的array\_\allowbreak{}view(或“一个等级为1的array\_\allowbreak{}view”)。
+
+图11.1中的第14行，array\_\allowbreak{}view使用标准\texttt{C++ vector}a创建了一个实例——av(a)。这里\texttt{C++ AMP}编译器使用一段常量数据作为输入，认为其是一维数组，并且认为数组的长度为给定的数值N。
+
+第16行对cv进行构建是，设置的两个参数，第一个表示数据元素的个数。av，bv和cv中元素的数量都为N。通常这里设置的N称为预设值。为了表示和操作这个值，\texttt{C++ AMP}提供了一个预设值模板\texttt{extent}——只需要设置一个整型作为模板参数，用来获取数据等级。具有维度的类模板，有些就支持指定特定的预设值指定一个或者多个整型数值，就像对cv的操作一样。cv构造函数传入的第二个参数是用来存储主机数据的数组。
+
+\subsection{C++ AMP parallel\_for\_each，或调用内核}
+
+图11.1中第16行使用了parallel\_\allowbreak{}for\_\allowbreak{}each结构，其属于\texttt{C++ AMP}数据并行计算的代码段。其类似于对OpenCL内核的启动。\texttt{C++ AMP}中对于数据集的操作称为\emph{计算区域}(compute domain)，并且定义了一个预设值对象。与OpenCL类似，每个线程都调用的是同一个函数，并且线程间都由自己区域，是完全分开的(类似于NDRange)。
+
+与\texttt{C++ STL}中标准算法for\_\allowbreak{}each类似，parallel\_\allowbreak{}for\_\allowbreak{}each函数模板就是将指定函数应用到对应的数据集上。第一个参数为一个预设值对象，其用指定数据并行计算的范围。本例中，我们要对array\_\allowbreak{}view上的每个数据执行了对应的操作，所以传入的预设值为cv array\_\allowbreak{}view的范围。这里，我们通过成员函数获取array\_\allowbreak{}view的范围值(cv.get\_\allowbreak{}extent())。这一个1维的预设值，其计算区域的整型值的范围为[0，n)。
+
+\textbf{与内核一样的仿函数}
+
+parallel\_\allowbreak{}for\_\allowbreak{}each的第二个参数是一个\texttt{C++}函数对象(或仿函数)。图11.1中，我们使用了\texttt{C++11}中的Lambda语法的方式，很容易的创建这个函数对象(或仿函数对象)。parallel\_\allowbreak{}for\_\allowbreak{}each会将这个函数对象(或仿函数)应用到计算区域的每个数据中。
+
+\textbf{获取内核参数}
+
+\texttt{[=]}字符使用的是Lambda表达式中的“获取”方式，让当前范围内中所声明的变量，以引用的方式传入Lambda函数中。本例中，我们将三个array\_\allowbreak{}view对象传入Lambda函数中。函数调用时，这些函数已经在主线程中初始化完毕。对于的index就是对应向量的长度或数量，其值与预设值的等级值相同。index参数idx用来索引array\_\allowbreak{}view对象中的值，第20行。
+
+\textbf{amp的限定修饰}
+
+本例中使用了一个扩展特性:restrict(amp)限定修饰符。\texttt{C++ AMP}中借用了C99中的关键字“restrict”，并且允许在其之后可以跟某个函数的函数列表(包括Lambda函数)。restrict关键字后面允许使用括号，括号内可以有一个或者多个限定符。\texttt{C++ AMP}只定义了两个限定符：\texttt{amp}和\texttt{cpu}。从限定符的字面意思也能猜出，这无疑是指定哪种计算设备作为加速代码执行的设备，不是将加速代码编译成CPU代码，就是将其代码编译成C++语言子集中的某种代码。
+
+如第18行所示，在传给paralle\_\allowbreak{}for\_\allowbreak{}each必须在调用操作符时使用restrict(amp)进行指定。其他函数也许要以类似的限定方式调用。restrict(amp)限定了指定函数必须以调用硬件加速器。当没有进行限定指定，那么就默认为restrict(cpu)方式。有些函数也可以进行双重指定，restrict(cpu, amp)，这种方式函数可能会在主机或加速器上执行，这需要对创建两种限定设备的上下文。
+
+之前说过，限定符支持使用\texttt{C++}语言子集作为函数体。在第一个\texttt{C++ AMP}的发布版本中，限定符反应了当前GPU在作为数据并行加速器时的一些限制。例如，\texttt{C++}的new操作符、递归，以及不允许使用虚函数。随着时间的推移，我们能期待这些限定逐渐解除，并且希望\texttt{C++ AMP}路线图上特性的限制越来越少。restrict(cpu)限定符，允许\texttt{C++}的所有操作，因为\texttt{C++ AMP}加速器代码是要在主机端运行。相较restrict(cpu)，restrict(amp)的限定则会更多一些。
+
+restrict(amp)中的Lambda函数体，其连续调用了几个array\_\allowbreak{}view对象。只要在函数生命域内的变量都能被Lambda函数所捕获。这里每个值都能在加速器运行加速代码时所使用到。对于\texttt{C++11}中的不可变Lambda函数，其不会在函数体中改变获取变量的值。\textbf{不过，array\_\allowbreak{}view对象中的元素将被改变，并且这些改变将会返回主机端。}本例中，我们在parallel\_\allowbreak{}for\_\allowbreak{}each中对cv进行修改，这些修改将会影响主机端向量c中的值。
+
+\myRefRule
+
+\begin{myRefs}
+
+[1] K. Gregory, A. Miller, \texttt{C++ AMP： Accelerated Massive Parallelism with Microsoft Visual C++}, Microsoft, 2012, 326 pp., ISBN:9780735664729.
+
+\end{myRefs}
+
+
+
+% ---- 11.3-chinese.md ----
+\section{编译器的目标 —— OpenCL 2.0}
+
+CLamp开源包括以下组件：
+
+\begin{itemize}
+\item \texttt{C++ AMP}编译器：该项目由Clang和LLVM衍生而出，其编译器支持\texttt{C++ AMP}作为\texttt{C++}语言的扩展，并且内核代码使用OpenCL C或可移植的中间码表示。
+\item \texttt{C++ AMP}头文件：由\texttt{C++ AMP}标准定义的一系列头文件。其对一些OpenCL内置函数进行了包装，但是有些还是需要再认真的考虑一下。
+\item \texttt{C++ AMP}运行时：用来连接主程序和内核的桥接库。连接可执行文件，其会加载和构建内核，设置内核参数和运行内核。
+\end{itemize}
+
+SPIR是LLVM中间码的一个子集，其用可用来表示OpenCL C程序。SPIR是可移植的，其没有具体设备的特征。其避免了让应用开发者只能通过加载文件的方式运行内核代码，否则开发人员就要管理不同设备上的内核版本。使用正确的SPIR中间码需要对应OpenCL平台支持cl\_\allowbreak{}khr\_\allowbreak{}spir扩展，并且有对应的SPIR版本(CL\_\allowbreak{}DEVICE\_\allowbreak{}SPIR\_\allowbreak{}VERSIONS)。为了使用SPIR格式对程序对象进行编译，我们将使用\texttt{clCreateProgramWithBinary()}。
+
+SPIR有两个可用版本。SPIR 1.2可以对OpenCL C的1.2版本通过LLVM(3.2版)进行编码，并且SPIR 2.0可以对OpenCL C的2.0版本进行编码(LLVM版本要求较新)。这样，我们就将OpenCL C与SPIR联系起来。后面章节中，我们将使用具体的中间码对照相应的OpenCL C源码，以便让中间码具有更好的可读性。
+
+基于向量相加的示例代码，剩余的章节将展示CLamp编译器重要的组件。与OpenCL无关的部分我们会省略，我们重点关注OpenCL是如何实现\texttt{C++ AMP}主要特性。从中我们也能学习到如何使用OpenCL实现对应平台的\texttt{C++ AMP}。
+
+
+
+% ---- 11.4-chinese.md ----
+\section{C++ AMP与OpenCL对比}
+
+为了将OpenCL映射到一个新的编程模型中，先将一些重要的步骤进行映射。表11.1中就展示了OpenCL相关步骤与\texttt{C++ AMP}的对应关系。
+
+表11.1 OpenCL的相关步骤在\texttt{C++ AMP}的对应情况
+
+\par\medskip\noindent
+\begingroup\fontsize{9bp}{12.5bp}\selectfont\renewcommand{\arraystretch}{1.12}
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+OpenCL & C++ AMP \\
+\midrule
+内核 & parallel\_for\_each中定义Lambda函数，或将一个函数直接指定给parallel\_for\_each \\
+内核名 & 使用C++函数操作符直接调用给定函数或Lambda函数 \\
+内核启动 & parallel\_for\_each \\
+内核参数 & 使用Lambda函数获取变量 \\
+cl\_mem内存 & concurrency::array\_view或array \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\endgroup
+\medskip
+
+图11.1中使用了Lambda函数作为并行执行的具体实现。这就类似于OpenCL中的内核函数，其会并行执行在各个工作项上。
+
+通常会使用内核名称生成具体的OpenCL内核对象，这里可以直接使用\texttt{c++}的函数操作符直接运行Lambda函数或给定的函数。\texttt{C++}中为了避免不命名冲突，使用了作用域规则生成对应的内核对象。
+
+其余的映射就是有关于主机端和设备端交互的。\texttt{C++ AMP}使用parallel\_\allowbreak{}for\_\allowbreak{}each来替代OpenCL中使用API进行传递内核函数和启动内核函数的过程。图11.1中使用的Lambda函数可以自动获取相关的参数，也就是自动的完成了向内核传递参数这一步骤。另外，Lambda中所是用到的array\_\allowbreak{}view，都可以认为是显式的cl\_\allowbreak{}mem内存。
+
+从概念上了解了二者的映射关系后，对于\texttt{C++ AMP}编译器来说只需要提供如下支持就可以：
+
+\begin{enumerate}
+\item 如何从周围的代码中获取OpenCL内核所需要的参数。
+\item 主机端需要在一条语句中完成创建内核、准备参数和内存，以及加载内核并运行的操作。
+\end{enumerate}
+
+\texttt{C++}Lambda函数可以当做为匿名函数，为了更加贴近于\texttt{C++}我们会重写这个Lambda表达式(如图11.3所示)。
+
+\begin{codebox}[cpp]
+class vecAdd{
+  private:
+    array_view<const float, 1>va, vb;
+    array_view<float, 1> vc;
+  public:
+    vecAdd(array_view<const float, 1> a,
+        array_view<const float, 1> b,
+        array_view<float, 1> c) restric(cpu)
+      :va(a), vb(b), vc(c){}
+    void operator()(index<1> idx) restrict(amp){
+      cv[idx] = av[idx] + bv[idx];
+    }
+};
+\end{codebox}
+
+图11.3 仿函数版本的\texttt{C++ AMP}向量相加。
+
+这段代码中，显式的将Lambda函数携程一个仿函数版本，其可以获取变量，va、vb和vc作为这个类的输出，并且将Lambda作为函数操作符的函数体。最后，构造函数通过主机端传入的参数生成对应的输出。
+
+不过，我们含有一些东西漏掉了：
+
+\begin{enumerate}
+\item 函数操作符在这里与OpenCL内核相对应。\texttt{C++ AMP}中使用parallel\_\allowbreak{}for\_\allowbreak{}each执行对应内核函数。不过，该仿函数是一个类，需要我们先创建一个实例。
+\item 运行时如何对内核的名称进行推断？
+\item array\_\allowbreak{}view在主机端可能包含有cl\_\allowbreak{}mem，不过在OpenCL设备端只能操作原始cl\_\allowbreak{}mem指针，而不允许在主机端对cl\_\allowbreak{}mem指针进行操作。这种关系需要理清楚，以便满足主机端和设备端不同的操作。
+\end{enumerate}
+
+为了弥合这些漏洞，我们需要在图11.3中的类中添加更多的东西。图11.4中的第1、21、29和31行。
+
+\begin{codeboxt}[cpp]{图11.4 扩展之后的向量相加——\texttt{C++ AMP}版本}
+// This is used to close the gap #3
+template<class T>
+class array_view{
+#ifdef HOST_CODE
+  cl_mem _backing_storage;
+  T *_host_ptr;
+#else
+  T *_backing_storage;
+#endif
+  size_t _sz;
+};
+
+class vecAdd{
+private:
+  array_view<const float, 1> va, vb;
+  array_view<float, 1> vc;
+public:
+  vecAdd(
+    array_view<const float, 1> a,
+    array_view<const float, 1> b,
+    array_view<float, 1> c)restrict(cpu)
+   :va(a), vb(b), vc(c){}
+  // This new constructor is for closing gap #1
+#ifndef HOST_CODE
+  vecAdd(__global float *a, size_t as, __global float *b, size_t bs, __global float *c, size_t cs) restrict(amp)
+   :va(a, as), vb(b, bs), vc(c, cs){}
+  void operator()(index<1> idx) restrict(amp){
+    cv[idx] = av[idx] + bv[idx];
+  }
+#endif
+  // The following parts are added to close the gap #1 and #2
+#ifndef HOST_CODE
+  // This is to close the gap #2
+  static const char *__get_kernel_name(void){
+    return mangled name of "vecAdd::trampoline(const __global float *va, const __global float *vb, __global float *vc)"
+  }
+#else // This is to close the gap #1
+  _kernel void trampoline(const __global float *va, size_t vas,   const __global float *vb, size_t vbs, __global float *vc, size_t vcs){
+    vecAdd tmp(va, vas, vb ,vbs, vc, vcs);// Calls the new constructor at line 20
+    index<1> i(get_gloabl_id(0));
+    tmp(i);
+  }
+#endif
+};
+\end{codeboxt}
+
+图11.4中的版本中，将三个遗留的问题进行弥补。第一行简单的定义了一个\texttt{concurrency::array\_view}，这个简单定义并不表示其就是标准\texttt{concurrency::array\_view}的实现。这里使用的方式就是使用宏的方式，使得主机端和设备端所在同种容器中，使用不同的宏定义情况下，具有不同的类型数据成员。注意这里我们将array\_\allowbreak{}view看作为一个OpenCL内存，这里我们就需要将OpenCL内存对象放入array\_\allowbreak{}view中(命名为backing\_\allowbreak{}storage)。同样，我们也需要添加两个成员函数，并且需要再定义一个新的构造函数，所以有些功能需要\texttt{C++ AMP}编译器在编译翻译过程中进行添加：
+
+\begin{itemize}
+\item 需要在编译主机端代码阶段获取内核名称
+\item 其次就是需要一个OpenCL内核，并且内核代码只能在设备端编译。并且运行时主机端就需要使用到这些内核的名字。编译器需要将这些函数对象拷贝一份，并连同内核参数传入设备端。
+\item 第22行的新构造函数会编译成只有设备端能使用的代码。其目的是使用新的构造函数，在GPU上够造出一个Lambda函数的副本(携带参数)，参数通常使用的地址并不是外部使用的那些。这就给了编译器相对自由的空间，并且可以在这之后进行一些优化。
+\end{itemize}
+
+不过，11.4图中的代码主要描绘了CLamp如何获取每个函数的名称(调用函数操作符)，新的构造函数会将Lambda表达式构造成适合于GPU端使用的函数，并且使用宏的方式让同一个数组容器可以包含主机端或设备端的内存。最后，输出的OpenCL代码中，我们将数组容器中的cl\_\allowbreak{}mem对象通过\texttt{clSetKernelArg()}API以一定的顺序设置入OpenCL内核当中。为了满足这些要求，需要实现的编译器具有如下的功能：
+
+\begin{itemize}
+\item 从主机端的Lambda函数中获取cl\_\allowbreak{}mem对象，并通过OpenCL\texttt{clSetKernelArg()} API对内存对象进行设置。
+\item 将对应的内核参数地址进行查询，并且调用新构造函数实例化与Lambda不太相同的设备端内核，以及内核参数。
+\item 参数的获取应该不会受到影响，并且参数的传递过程是不透明的。例如，array\_\allowbreak{}view中\_\allowbreak{}sz的值就需要通过主机端传递给设备端。
+\end{itemize}
+
+为了系统的实现这些功能，需要清晰的指明，Lambda函数中需要哪种类型的数据。表11.2中描述了图11.4中哪些数据需要在设备端和主机端使用。
+
+表11.2 将主机端的数据成员与设备端进行映射
+
+\par\medskip\noindent
+\begingroup\fontsize{9bp}{12.5bp}\selectfont\renewcommand{\arraystretch}{1.12}
+\begin{center}
+\begin{tabularx}{\textwidth}{XXXX}
+\toprule
+数据成员 & 主机端 & 设备端 & 注意 \\
+\midrule
+array\_view\textless{}const float, 1\textgreater{} va & cl\_mem va.\_backing\_storage & \_\_global float *va\_backing\_storage & 通过clSetKernelArg进行传递 \\
+va的尺寸 & size\_t va.\_sz & size\_t va.\_sz & 字面方式传递 \\
+array\_view\textless{}const float, 1\textgreater{} vb & cl\_mem vb.\_backing\_storage & \_\_global float *vb.\_backing\_storage & 通过clSetKernelArg进行传递 \\
+vb的尺寸 & size\_t vb.\_sz & size\_t vb.\_sz & 字面方式传递 \\
+array\_view\textless{}float, 1\textgreater{} vc & cl\_mem vc.\_backing\_storage & \_\_global float *vc.\_backing\_storage & 通过clSetKernelArg进行传递 \\
+vc的尺寸 & size\_t vc.\_sz & size\_t vc.\_sz & 字面方式传递 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\endgroup
+\medskip
+
+根据对应关系，可以通过\texttt{C++ AMP}的parallel\_\allowbreak{}for\_\allowbreak{}each生成OpenCL内核。这可以通过图11.4中的\texttt{C++}模板进行实现。基于表中的对应关系，可以实现对应的parallel\_\allowbreak{}for\_\allowbreak{}each，如图11.5所示。
+
+\begin{codeboxt}[cpp]{图11.5 主机端的parallel\_for\_each实现(概念代码)}
+template<class T>
+void parallel_for_each(T k){
+  // Locate the kernel source file or SPIR
+  // Construct an OpenCL Kernel named k::__get_kernel_name()
+  // We need to look into the objects
+  clSetKernelArg(..., 0, k.va._backing_storage);// cf. line5 of Figure 3
+  clSetKernelArg(..., 1, k.va._sz);
+  clSetKernelArg(..., 2, k.vb._backing_storage);
+  clSetKernelArg(..., 3, k.vb._sz);
+  clSetKernelArg(..., 4, k.vc._backing_storage);
+  clSetKernelArg(..., 5, k.vc._sz);
+  // Invoke the kernel
+  // We need to copy the results back if necessary from vc
+}
+\end{codeboxt}
+
+为了产生适合图11.5中的OpenCL内核点，我们需要将所要执行的对象进行遍历，并筛选出相关的对象供内核函数调用(第6-11行)。另外，生成的内核代码的参数顺序也要和主机端实现对应起来。
+
+之前，仿函数是一种向\texttt{C++ AMP}传递数据的方式，不过对于OpenCL内核来说，需要将相关的数据与内核参数顺序进行对应。基本上CPU端的地址，都会要拷贝并转化成GPU端能使用的地址：函数中有太多数据成员需要拷贝，这样的拷贝最好放在初始化的时候去做。
+
+我们之前通过值的方式进行OpenCL内存的传递。不过，复杂的地方在于我们如何将内存通过不透明的方式传递给对应句柄，需要依赖于OpenCL运行时创建对应的GPU内存空间，并将主机端的内存拷贝到GPU上。
+
+这里有的读者可能会发现，图11.5中的实例代码有点类似于对象的\href{http://en.wikipedia.org/wiki/Serialization}{序列化}。因为在实现的时候，我们不希望将相应的数据在外部进行存储和检索，所以我们需要压缩更多的数据，并通过\texttt{clSetKernelArg()}将相关数据设置到GPU内部。
+
+需要注意的是，其他语言中(比如：java)序列化和反序列通过代码的顺序进行反映，这种反映并不是\texttt{C++}源码级别的，所以无需对编译器进行很大的改动。\texttt{C++ AMP}编译器中，序列化和反序列化代码的顺序，都会通过枚举数据变量的方式，进行内核参数的设置。
+
+
+
+% ---- 11.5-chinese.md ----
+\section{C++ AMP的编译流}
+
+上一节中我们了解了\texttt{C++ AMP}与OpenCL的对应关系，那么对于编译和链接\texttt{C++ AMP}程序的方式也应该很容易理解。具体到CLamp编译器上，其进行如下的一些操作：
+
+\begin{enumerate}
+\item 写完代码之后，将\texttt{C++ AMP}源码以“设备端模式”进行编译(所有\texttt{C++ AMP}指定的语言规则都会检查并应用)。CLamp编译器可以产生相应的OpenCL内核(基于AMP的约束函数)，并将其编译成LLVM的位码文件。内核所调用的函数都必须是内联函数。主机端程序也会编译成生成相应的位代码，然后生成对应的\texttt{C++}函数。
+\item LLVM位代码通过一些变化来保证底层OpenCL程序的正确性。首先是对主机端代码的修整，然后确保在OpenCL程序中内核和指令中所使用的指针地址空间的正确性(\_\allowbreak{}\_\allowbreak{}global, \_\allowbreak{}\_\allowbreak{}constant, \_\allowbreak{}\_\allowbreak{}local, \_\allowbreak{}\_\allowbreak{}private)。这里需要注意的是，\texttt{C++ AMP}和OpenCL的指针在地址空间上是不相同的。OpenCL中，地址空间值指针类型的一种，而在\texttt{C++ AMP}中其为指针值的一种。因此，静态编译分析器会，通过指针的负值和使用操作，自行推断所使用的指针的地址空间。另外，对LLVM位数据的转换也会使用到元数据，使其能与OpenCL SPIR格式兼容。
+\item 将LLVM位码编译成OpenCL SPIR位码之后，就可以在支持cl\_\allowbreak{}khr\_\allowbreak{}spir扩展特性的平台上直接链接和执行。编译后的二进制文件会以另外的形式保存，其格式与主机端程序的格式是不一样的。另外，OpenCL C格式的内核代码可以使用在任何支持OpenCL平台的设备上，即使对应的设备不支持SPIR模式。
+\item 输入的\texttt{C++ AMP}源码会以“主机模式”对主机端代码进行编译。\texttt{C++ AMP}头文件都是设计好的，所以不会有内核代码在主机端模式下进行编译。不过，程序会调用\texttt{C++ AMP}运行时API函数来取代内核执行部分的代码。
+\item 主机端和设备端代码最终都会链接在一起，并产生一个可执行文件
+\end{enumerate}
+
+
+
+% ---- 11.6-chinese.md ----
+\section{编译之后的C++ AMP代码}
+
+我们再回顾一下\texttt{C++ AMP}以Lambda函数实现的向量相加，如图11.6所示。
+
+\begin{codeboxt}[cpp]{图11.6 \texttt{C++ AMP}Lambda函数的向量相加}
+[=](index<1> idx) restrict(amp){cv[idx]=av[idx]+bv[idx];}
+\end{codeboxt}
+
+使用CLamp将其翻译成OpenCL内核代码时，就如图11.7所示。
+
+\begin{codeboxt}[cpp]{图11.7 OpenCL SPIR版的向量相加}
+__kernel void
+ZZ6vecAddPfS_S_iEN3__019__cxxamp__trampolineEiiS_N11Concurrency11access_typeEiiS_S2_iiS_S2_(
+  __global float *llvm_cbe_tmp__1,
+  unsigned int llvm_cbe_tmp__2,
+  __global float *llvm_cbe_tmp__3,
+  unsigned int llvm_cbe_tmp__4,
+  __global float *llvm_cbe_tmp__5,
+  unsigned int llvm_cbe_tmp__6){
+
+  unsigned int llvm_cbe_tmp__7;
+  float llvm_cbe_tmp__8;
+  float llvm_cbe_tmp__9;
+  llvm_cbe_tmp__7 = /*tail*/get_global_id(0u);
+  llvm_cbe_tmp__10 = *((&llvm_cbe_tmp__1[((signed int)llvm_cbe_tmp__7)]));
+  llvm_cbe_tmp__11 = *((&llvm_cbe_tmp__3[((signed int)llvm_cbe_tmp__7)]));
+  *((&llvm_cbe_tmp__5)[((signed int)llvm_cbe_tmp__7)])) = (((float)(llvm_cbe_tmp__10 + llvm_cbe_tmp__11)));
+  return;
+}
+\end{codeboxt}
+
+看起来编译器处理过之后的代码可读性差很多，不过这里我们依旧不难找到下面一些对关系：
+
+\begin{itemize}
+\item 第1行：生成对应的内核名
+\item 第2-3行：序列化array\_\allowbreak{}view va
+\item 第4-5行：序列化array\_\allowbreak{}view vb
+\item 第6-7行：序列化array\_\allowbreak{}view vc
+\item 第11行：获取全局工作项索引，通过\texttt{C++ AMP}Lambda函数中的idx获取
+\item 第12行：加载va[idx]
+\item 第13行：加载vb[idx]
+\item 第14行：计算va[idx]+vb[idx]，并将结果保存在vc[idx]
+\end{itemize}
+
+
+
+% ---- 11.7-chinese.md ----
+\section{OpenCL 2.0提出共享虚拟内存的原因}
+
+OpenCL 2.0中SVM共享虚拟内存特性的添加尤为重要。这让主机端和设备端可以访问同一上下文中的地址空间。其也支持在主机端和内核间传递自定义结构体的指针。这个特性可以理解成将设备端的全局内存扩张到了主机端内存空间中，因此OpenCL中的工作项就能够访问主机端地址空间的数据。
+
+根据OpenCL 2.0标准，SVM分为三种：
+
+\begin{enumerate}
+\item 粗粒度SVM：数据以OpenCL内存对象的形式共享。其具有一些同步点——内核执行、映射和逆映射。
+\item 细粒度SVM：数据以OpenCL内存对象的形式共享。不需要进行显式同步，不过在主机端和设备端对相应内存进行原子操作时，内存数据需要进行同步。
+\item 系统细粒度SVM：设备端和主机端使用的内存可以认为是完全一样的，内存对象使用的方式和C/C++一样。
+\end{enumerate}
+
+表11.3展示了2.0之前、粗粒度SVM和细粒度SVM间的不同。
+
+表11.3 OpenCL共享数据的行为对比
+
+\par\medskip\noindent
+\begingroup\fontsize{9bp}{12.5bp}\selectfont\renewcommand{\arraystretch}{1.12}
+\begin{center}
+\begin{tabularx}{\textwidth}{XllX}
+\toprule
+操作 & 2.0之前 & 粗粒度SVM & 细粒度SVM \\
+\midrule
+数据拷贝到设备端 & clEnqueueWriteBuffer & 不需要 & 不需要 \\
+设备端执行原子操作对主机端可见 & 不适用 & 不可见 & 可见 \\
+设备端对数据进行修改对主机端可见 & 需要进行拷贝之后可见 & 内核执行完成时 & 内核执行完成后，或在设备端执行原子操作之后 \\
+数据从设备端拷贝到主机端 & clEnqueueReadBuffer & 不需要 & 不需要 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\endgroup
+\medskip
+
+细粒度SVM具有一个特殊能力，就是支持主机端和设备同时对同一块内存地址进行原子操作。直方图统计的例子中，使用细粒度SVM就可以和主机或其他设备合作完成该工作；他们都共享同一块内存，并且都能看到相应的数据，在原子操作完成后，每个设备上都会看到最新的数据。
+
+OpenCL 2.0中，粗粒度SVM是强制要求支持，其他两种类型可以选择支持。本节中，我们就来聊一下如何在\texttt{C++ AMP}中使用粗粒度SVM。注意，粗粒度SVM有点类似于OpenCL 1.x中的内存对象，不过其不需要显式的通过\texttt{clEnqueueWriteBuffer()}进行写入。因为相似，CLamp将组粒度SVM认为是一种性能有所提升的\texttt{concurrency::array\_view}实现。
+
+为了利用粗粒度SVM，主机端需要调用\texttt{clSVMAlloc()}分配出SVM内存，这段内存可以在主机端和设备端共享。cl\_\allowbreak{}mem对象是通过\texttt{clCreateBuffer()}通过传入\texttt{CL\_MEM\_USE\_HOST\_PTR}参数和主机端内存指针进行创建。这里\texttt{clSVMAlloc()}分配出的指针就类似于传入的主机端指针。
+
+同样，内存中的内容设备端和主机端也是能够自动共享的。这里就不需要再去调用\texttt{clEnqueueWriteBuffer()}和\texttt{clEnqueueReadBuffer()}，来完成设备端和主机端数据进行共享了。
+
+当不在需要SVM内存，可以通过\texttt{clReleaseMemObject()}API对粗粒度SVM对象进行释放。之后，还需要通过\texttt{clSVMFree()}API销毁SVM内存所开辟的空间。
+
+
+
+% ---- 11.8-chinese.md ----
+\section{编译器怎样支持C++ AMP的线程块划分}
+
+线程划分属于GPU优化中的一个技巧。根据抽象的等级，编程模型可以显式的或隐式的支持线程划分。隐式的方式可能会自动的减少在一个线程束中对内存的访问，并且通过透明或半透明的线程划分，来达到最佳内存形式，并且获取最佳的性能。与之相反，显式的方式需要用户显式定义不同的内存对象(可能有些内存在片上共享，有些内存是离散的)，相关的数据移动也由用户进行控制。\texttt{C++ AMP}、CUDA和OpenCL都属于显式编程模型。剩下的内容，我们将一个编译器作者的角度，来考虑如何显式的支持线程划分。
+
+对于支持线程划分的显式编程模型，我们通常都可以看到如下的特点：
+
+\begin{itemize}
+\item 通过某种方式将计算域划分成固定大小的小块
+\item 通过显式的方式进行数据内存的指定，通常是片上、离散或线程私有这几种形式。其在OpenCL中的对应为\_\allowbreak{}\_\allowbreak{}local, \_\allowbreak{}\_\allowbreak{}global和\_\allowbreak{}\_\allowbreak{}private
+\item 为固定大小的计算块提供同步机制，以便于不同工作项之间的协同工作
+\end{itemize}
+
+对于GPU有些了解的读者，可能对于\texttt{C++ AMP}不是很了解。\texttt{C++ AMP}中需要使用extent类中尺寸描述符，对计算区域的大小进行确定。另外，tile\_\allowbreak{}extent描述了和对计算区域进行分块。其划分方式与OpenCL类似。
+
+\subsection{划分计算域}
+
+\texttt{C++ AMP}中有extent类中一个成员函数名为“tile”，用来计算tile\_\allowbreak{}extent。该模板函数的参数就说明了划分区域的大小。现在\texttt{C++ AMP}就与OpenCL不太相同了，\texttt{C++ AMP}中的划分方式静态参数化的。
+
+为了让库和编译器了解划分区域的信息，我们使用了一个带有一些参数Lambda内核)，将一些参数一次转换为tiled\_\allowbreak{}index。tiled\_\allowbreak{}index与OpenCL中的get\_\allowbreak{}gloab\_\allowbreak{}id(), get\_\allowbreak{}local\_\allowbreak{}id()和get\_\allowbreak{}group\_\allowbreak{}id()所获取的值一致。
+
+\begin{codebox}[cpp]
+void mxm_amp_tiled(
+  int M, int N, int W,
+  const std::vector<float> &va,
+  const std::vector<float> &vb,
+  std::vector<float> &result){
+
+  extent<2> e_a(M, N), e_b(N, W), e_c(M, W);
+
+  array_view<const float, 2> av_a(e_a, va);
+  array_view<const float, 2> av_b(e_b, vb);
+  array_view<float, 2> av_c(e_c, result);
+
+  extent<2> compute_domain(e_c);
+  parallel_for_each(compute_domain.tile<TILE_SIZE, TILE_SIZE>(),
+    [=](tiled_index<TILE_SIZE, TILE_SIZE> tidx) restrict(amp) {
+      mxm_amp_kernel(tidx, av_a, av_b, av_c);
+    });
+}
+\end{codebox}
+
+\subsection{指定地址空间和栅栏}
+
+\texttt{C++ AMP}中的内核函数中，使用tile\_\allowbreak{}static限定符用来声明对应内存对象在片上内存上分配(OpenCL中对应的是本地内存)。为了强制\texttt{C++ AMP}划分块中的线程同步，\texttt{C++ AMP}为tile\_\allowbreak{}static对象提供了barrier.wait函数。和OpenCL中的概念一样，当该函数调用时，所有线程都要在同步调用点处停止。
+
+\texttt{C++ AMP}和OpenCL有个有趣的区别在于地址空间处。OpenCL中，其是指针类型的一种，其指针使用\_\allowbreak{}\_\allowbreak{}local进行声明(不能使用\_\allowbreak{}\_\allowbreak{}private对一段内存进行声明)。\texttt{C++ AMP}中地址空间时指针值的一部分。可以使用通用指针进行指定：
+
+\begin{codebox}[cpp]
+float *foo;
+\end{codebox}
+
+指针foo可以指向一个使用tile\_\allowbreak{}static创建的内存(与OpenCL中的\_\allowbreak{}\_\allowbreak{}local等价)，因为一定的局限性[1]同一个指针，只能指向全局内存中的一个值。
+
+我们可以尝试在定义一个\texttt{C++ AMP}中tile\_\allowbreak{}static的宏，用以宏扩展Clang/LLVM中的\texttt{\_\_attribute\_\_((address\_space()))}限定符。其作为嵌入式C的一种扩展，将类型作为指针和内存对象类型的一部分。不过，在下面的代码片段中，这种方式可能无法产生foo指针正确的地址空间信息：
+
+\begin{codebox}[cpp]
+tile_static float bar;
+float *foo = &bar;
+\end{codebox}
+
+因为我们没有办法嵌入地址空间描述符，让其作为指针类型的一部分，不过我们需要解决这种形式的使用，需要将地址空间信息作为变量定义的一部分。编译器使用模板的方式，显然已经不能对这种使用方式进行区分。
+
+一种替代的方法是，通过将地址空间以变量属性方式对这些特殊的变量进行标记(而不是其类型定义的一部分)。这种属性可以作为编译器的一种扩展，可以用来指定二进制文件中对应数据段的变量定义。这里的属性是与定义的变量相关，与这个变量的类型无关：比如有两个整型书在不同的数据段，并且有指针可以指向不会出现类型错误的那个整型数。在CLamp中，我们使用的方法是——通过数据流分析进行简单映射，从而减少对地址空间信息的依赖，不过这些代码在\texttt{C++}中依旧是合法的：
+
+\begin{itemize}
+\item 定义\texttt{C++ AMP}中的tile\_\allowbreak{}static作为变量属性。
+\item 所有指针进行了初始化，不过没有进行地址空间的指定。
+\item 基于静态单赋值分析的方式，减少指向变量的属性。
+\end{itemize}
+
+这里的分析只是解决了众多问题中比较简单的，有些问题使用这种方式解决会出现不可预料的结果。下一节我们将仔细说明一下，如何进行地址空间的推断。
+
+[1] 在\texttt{C++ AMP}1.2中，这种限制是为了能让编译器能够更好的推断相应内存对象的地址空间信息
+
+
+
+% ---- 11.9-chinese.md ----
+\section{地址空间的推断}
+
+上节中声明的每个OpenCL变量都具有自己地址空间限定符，用来区分这个变量是在哪端内存区域上分配的。地址空间对于OpenCL来说是十分中要的特性。将数据放入不同的内存区域，OpenCL程序在获得高性能的同时，保证了数据一致性。这个特性通常不会出现一些比较高级的语言中，比如\texttt{C++ AMP}。高级语言将数据放入通用地址空间内，从而就不用显式的说明这些内存是在哪里开辟的。OpenCL中声明的变量如果没有限定符，那么默认在私有内存上进行分配，这就违反了\texttt{C++ AMP}中的既定行为。举个例子，如果将tile\_\allowbreak{}static的声明限定于私有，那么这个对象上的数据将不会与其他工作项共享，并且计算得到的结果是错误的。为了解决这个矛盾，就需要为每个声明和内存访问添加正确的地址空间信息。
+
+CLamp中，生成OpenCL位码之后，需要在通过一次LLVM的转换，为相应的变量声明添加上正确的地址空间信息。理论上每个声明进行地址空间的推断是不可行的，因为分析器看不到整个程序，所以无法判断哪些内核要和哪些变量进行交互。不过，实际使用的程序中，推断地址空间是可行的。
+
+array和array\_\allowbreak{}view的实现都为推断地址空间提供着线索。\texttt{C++ AMP}中，只有通过array和array\_\allowbreak{}view才能将大量的数据传入内核。\texttt{C++ AMP}运行时为内核的参数列表预留了指针。内核在使用这些数据时，只需要访问相关的指针即可。这些指针都会描述成全局的，因为这些数据时要每个工作项都可见的。推断过程的依据就是内核函数的参数列表，相关指针限定为全局，并且通过这些指针对更新所有内存操作。
+
+tile\_\allowbreak{}static数据的声明不能通过模式分析进行判别，所以CLamp的前端编译器要保存这些声明。当前的CLamp实现中，限定符声明tile\_\allowbreak{}static的部分，使用一段特殊的位码进行表示。推断过程会将tile\_\allowbreak{}static属性传递给任意一个指针，这些指针能获取这些变量的地址，然后将其添加到对应的OpenCL声明中。
+
+我们看一个简单的\texttt{C++ AMP}实例，通过这个实例我们来了解转换是如何进行的：
+
+\begin{codebox}[cpp]
+void mm_kernel(int *p, int n){
+  tile_static int tmp[30];
+  int id = get_global_id(0);
+  tmp[id] = 5566;
+  barrier(0);
+  p[id] = tmp[id];
+}
+\end{codebox}
+
+通过CLamp初始化之后，代码将完全转化成LLVM IR。这个阶段中，地址空间是缺失的，并且这段代码会产生一个不正确的结果。注意变量tmp会放在一个特殊的ELF字段中(“clamp\_\allowbreak{}opencl\_\allowbreak{}local”):
+
+\begin{codebox}[text]
+@mm_kernel.tmp = internal unnamed_addr global[30xi32] zeroinitializer, align 16, section "clamp_opencl_local"
+
+define void @mm_kernel(i32 *nocapture %p, i32 %n){
+  %1 = tail call i32 bitcast (i32(...)* @get_global_id to i32 (i32)*)(i32 0)
+  %2 = sext i32 % to i64
+  %3 = getelementptr inbounds[30 x i32]* @mm_kernel.tmp, i64 0, i64 %2
+  %4 = tail call i32 bitcast (i32(...)* @barrier to i32(i32)*)(i32 0) #2
+  %5 = load i32 *%3, align 4, !tbaa!1
+  %6 = getelementptr inbounds i32* %p, i64 %2
+  store i32 %5, i32 * %6, align 4, !tbaa !1
+  ret void
+}
+\end{codebox}
+
+CLamp分析完成后，正确的地址空间信息就添加到对应的声明中去(mm\_\allowbreak{}kernel.tmp中的一些内存操作)。正确的LLVM IR如下所示：
+
+\begin{codebox}[text]
+@mm_kernel.tmp = internal addrspace(3) unnamed_addr global[30xi32] zeroinitializer, align 4
+
+define void @mm_kernel(i32 addrspace(1)*nocapture %p, i32 %n){
+  %1 = tail call i32 bitcast(i32 (...)* @get_global_id to i32(i32)*)(i32 0)
+  %2 = getelementptr inbounds[30 x i32] addrspace(3)* @mm_kenrel.tmp, i32 0, i32 %1 store i32 5566, i32 addrspace(3) %2, align4, !tbaa!2
+  %3 = tail call i32 bitcast (i32(...) * @barrier to i32(i32)*)(i32 0)
+  %4 = load i32 addrspace(3)* %2, align4, !tbaa !2
+  %5 = getelementptr inbounds i32 addrspace(1) * %p, i32 %1
+  store i32 %4, i32 addrspace(1)* %5, align 4, !tbaa !2
+  ret void
+}
+\end{codebox}
+
+
+
+% ---- 11.10-chinese.md ----
+\section{优化数据搬运}
+
+随着处理器的发展，执行的速度是越来越快，计算能力也逐渐不再是高性能系统的主要瓶颈。对于数据敏感的计算来说，其主要瓶颈是在内存带宽上。很多例子中，数据在主机端和加速器间的搬运时间，要远远大于其计算所消耗的时间。为了最小化这段开销，OpenCL为加速器提供了多种创建内存对象的方法。OpenCL中\texttt{CL\_MEM\_READ\_ONLY}索引就代表了这段内存不能在计算时进行修改。如果使用这个索引创建的内存对象，需要在其中放置一些常量数据，这些数据在计算完成后也不需要拷贝回主机。与之相反，\texttt{CL\_MEM\_WRITE\_ONLY}索引所创建的内存，大多数情况下是用来存放结果数据的。如果使用这个索引创建出的内存对象，不需要在加速器计算之前拷贝数据到这个内存当中。要将\texttt{C++ AMP}与OpenCL这些特性对应起来，我们就可以对应用的性能进行提升
+
+\subsection{discard\_data()}
+
+\texttt{C++ AMP}中discard\_\allowbreak{}data()是array\_\allowbreak{}view的一个成员函数。在运行时调用这个函数会将对应对象上的数据进行复写，因此就没有必要在计算开始之前，将数据拷贝到设备端。这种情况下，我们可以使用\texttt{CL\_MEM\_WRITE\_ONLY}创建一个内存对象。
+
+\subsection{\texttt{array\_view\textless{}const T, N\textgreater{}}}
+
+如果一个array\_\allowbreak{}view对象的第一个模板参数的限定符是const，那么我们只能通过\texttt{CL\_MEM\_READ\_ONLY}创建相应的内存对象。这样的话，OpenCL运行时就能知道，哪段内存在计算的时候不能够被修改。因此，这个内存对象上所存储的数据，在计算完成后不需要拷贝回主机。
+
+
+
+% ---- 11.11-chinese.md ----
+\section{完整例子:二项式期权}
+
+本节中，我们以一个应用开发者的角度来看一个较为复杂的例子。这里的代码需要使用之前章节所提到的编译技术进行转换，转换成一个正确，且有较高性能OpenCL实现。应用我们选择了二项式期权。注意，我们不会从数学和经济学的角度深度探讨该问题，只是对于编译器作者来说，将其做为一个完整的例子。
+
+\begin{codebox}[cpp]
+void binomial_options_gpu(
+  std::vector<float> &v_s,
+  std::vector<float> &v_x,
+  std::vector<float> &v_vdt,
+  std::vector<float> &v_pu_by_df,
+  std::vector<float> &v_pd_by_df,
+  std::vector<float> &call_value)
+\end{codebox}
+
+上面的代码就是二项式期权函数的声明，其中call\_\allowbreak{}value作为存储最终结果的对象，其他的参数都仅作为输入参数。
+
+\begin{codebox}[cpp]
+extent<1> e(data_size);
+arrar_view<float, 1> av_call_value(e, call_value);
+av_call_value.discard_data();
+\end{codebox}
+
+为了将输入数据输入内核函数，数据需要通过\texttt{C++ AMP}的容器进行包装。本例中，使用\texttt{concurrency::array\_view}。av\_\allowbreak{}call\_\allowbreak{}value对象调用discar\_\allowbreak{}data，就是用来告诉运行时，这段数据无需从主机端拷贝到设备端。
+
+\begin{codebox}[cpp]
+array_view<const float, 1> av_s(e, v_s);
+array_view<const float, 1> av_x(e, v_x);
+array_view<const float, 1> av_vdt(e, v_vdt);
+array_view<const float, 1> av_pu_by_df(e, v_pu_by_df);
+array_view<const float, 1> av_pd_by_df(e, v_pd_by_df);
+
+exten<1> ebuf(MAX_OPTIONS * (NUM_STEPS + 16));
+array<float, 1> a_call_buffer(ebuf);
+\end{codebox}
+
+注意这里av\_\allowbreak{}s，av\_\allowbreak{}x，av\_\allowbreak{}vdt，av\_\allowbreak{}pu\_\allowbreak{}by\_\allowbreak{}df，av\_\allowbreak{}pd\_\allowbreak{}by\_\allowbreak{}df均由array\_\allowbreak{}view包装，也就是在计算完成后不需要拷贝回主机。
+
+\begin{codebox}[cpp]
+extent<1> compute_extent(CACHE_SIZE * MAX_OPTIONS);
+parallel_for_each(compute_extent.tile<CACHE_SIZE>(),
+  [=, &a_call_buffer]tile_index<CACHE_SIZE> ti)restrict(amp){
+    binomial_options_gpu(ti, av_s, av_x, av_vdt, av_pu_by_df, av_pd_by_df, av_call_value, a_call_buffer);
+  });
+av_call_value.synchronize();
+\end{codebox}
+
+\texttt{C++ AMP}使用parallel\_\allowbreak{}for\_\allowbreak{}each完成计算。在计算完成之后，使用同步成员函数对计算结果进行同步，以确保所有计算结果都已经保存在容器中。所有使用到的数据都会在运行时进行隐式处理。编程者不需要显式的在设备和主机之间进行数据的传递或拷贝。注意parallel\_\allowbreak{}for\_\allowbreak{}each使用显式线程划分进行线程局部控制。
+
+\begin{codebox}[cpp]
+void binomial_options_kernel(
+  tiled_index<CACHE_SIZE> &tidx,
+  array_view<const float, 1> s,
+  array_view<const float, 1> x,
+  array_view<const float, 1> vdt,
+  array_view<const float, 1> pu_by_df,
+  array_view<const float, 1> pd_by_df,
+  array_view<float, 1> call_value,
+  array<float, 1> &call_buffer) restrict(amp){
+
+  index<1> tile_idx = tidx.tile;
+  index<1> local_idx = tidx.local;
+
+  tile_static float call_a[CACHE_SIZE + 1];
+  tile_static float call_b[CACHE_SIZE + 1];
+
+  int tid = local_idx[0];
+  int i;
+
+  for (i = tid; i <= NUM_STEPS; i+= CACHE_SIZE){
+    index<1> idx(tile_idx[0] * (NUM_STEPS + 16) + (i));
+    call_buffer[idx] = expiry_call_value(s[tile_idx], x[tile_idx], vdt[tile_idx], i);
+  }
+
+  for (i = NUM_STEPS; i > 0; i -= CACHE_DELTA){
+    for (int c_base = 0; c_base < i; c_base += CACHE_STEP){
+      int c_start = min(CACHE_SIZE - 1, i - c_base);
+      int c_end = c_start - CACHE_DELTA;
+
+      tidx.barrier.wait();
+      if (tid <= c_start){
+        index<1> idx(tile_idx[0] * (NUM_STEPS + 16) + (c_base + tid));
+        call_a[tid] = call_buffer[idx];
+      }
+
+      for (int k = c_start - 1; k >= c_end;){
+        tidx.barrier.wait();
+        call_b[tid] = pu_by_df[tile_idx] * call_a[tid + 1] + pd_by_df[tile_idx] * call_a[tid];
+        k--;
+
+        tidx.barrier.wait();
+        call_a[tid] = pu_by_df[tile_idx] * call_b[tid + 1] + pd_by_df[tile_idx] * call_b[tid];
+        k--;
+    }
+
+    tidx.barrier.wait();
+    if (tid <= c_end){
+      index<1> idx(tile_idx[0] * (NUM_STEPS + 16) + (c_base + tid));
+      call_buffer[idx] = call_a[tid];
+    }
+  }
+
+  if (tid == 0){
+    call_value[tile_idx] = call_a[0];
+  }
+}
+\end{codebox}
+
+声明为tile\_\allowbreak{}static类型的数据将在同一工作组内进行共享。为了确保共享数据的一致性，我们这里使用了tidx.barrier.wait函数。在同一工作组内的工作项将会在这个调用点进行等待，直到工作组内所有线程都到达该调用点为止。
+
+
+
+% ---- 11.12-chinese.md ----
+\section{初步结果}
+
+为了\texttt{C++ AMP}的性能，我们使用了两种方式对二项式期权进行了\href{http://bitbucket.org/UncleHandsome/benchmark}{性能测试}。第一种方式是直接使用OpenCL实现，并使用一种较为特殊的实现完成该程序。第二种方式是通过\texttt{C++ AMP}的方式，编译使用CLamp，在实验中我们将执行的OpenCL代码转换成相同平台，以便进行对比。我们使用的配置如下：
+
+\begin{itemize}
+\item GPU: AMD Radeon R7 260X
+\item Linux kernel: 3.16.4-1-ARCH
+\item AMD Catalyst driver: 14.301.1001
+\item AMD OpenCL accelerated parallel processing(APP) software development kit (SDK): v2.9-1
+\end{itemize}
+
+\myGraphic{0.92}{images/chapter11/11-12-table.png}{}
+
+表中展示了\texttt{C++ AMP}所生成的执行内核，与直接写成的OpenCL内核完成时间几乎相同，不过在编译阶段\texttt{C++ AMP}还是用时过长。这是因为当前的实现中，编译阶段会取添加一些数学函数，让内核源码代码的长度比直接使用OpenCL内核代码的长度长10倍。其他的时间就是对OpenCL内存进行写入，以及参数的传递。因为在性能测试中使用了\texttt{CL\_MEM\_USE\_HOST\_PTR}对于当前测试版本的\texttt{C++ AMP}来说，没有多余的性能开销。
+
+通常情况下，应用中只需要对内核加载一次，所以编译的时间通常不会算在计算时间内。不过，对于不同的用户，所关注的点不一样，所以用户可以从自己的角度对这两应用版本进行对比。
+
+这次对二项式期权的比较当中，OpenCL主机端和设备端的代码加起来一共160行，而\texttt{C++ AMP}的代码只有80行。这就能很明显的看出，具有高级编程模式的\texttt{C++ AMP}使用起来要比OpenCL更为简单。
+
+
+
+% ---- 11.13-chinese.md ----
+\section{本章总结}
+
+本章，我们如何使用OpenCL实现\texttt{C++ AMP}。\texttt{C++ AMP}中，我们可以远离数据搬运，相应的工作由编译器完成。并展示了高级编译转换中的主要步骤，将面向对象的\texttt{C++ AMP}代码转换成OpenCL所使用的主机端和设备端内核。使用二项式期权的例子进行性能测试，我们展示了使用CLamp(MulticoreWare公司的\texttt{C++ AMP}实现)的应用，与直接使用OpenCL实现的应用之间的性能对比。数据表明OpenCL更适合作为高级编程模式(例如\texttt{C++ AMP})的实现，从而在对应平台上获得最佳性能。
+
+

@@ -1,0 +1,1350 @@
+% ============================================================
+%  第4章 OpenCL案例
+%  源文件：content/chapter4/
+% ============================================================
+
+
+% ---- 4.1-chinese.md ----
+\section{OpenCL实例}
+
+本章会讨论一些简单的OpenCL实例，第3章总结出的一些结论同样适用于这些实例。实例证明，编程的每一步都需要出现在一个完整的OpenCL应用中。对于习惯用C++的同学，我们也会使用C++ Wrapper实现一个实例。我们讨论的这些例子，相较于有更深层次优化的代码，算是一个基线版本。优化相关的内容将在之后的章节中讨论。
+
+表4.1中将我们要使用到的OpenCL特性和具体实例一一对应。同学们可以按照自己的喜好，去关注特定的实例。
+
+每节的末尾，我们都将提供完整的程序代码。另外，实例中使用到的一些功能函数将在本章末尾提供源码，有兴趣的同学可以先看看。这些功能函数包括对OpenCL代码的查错和报错，从文件中读取OpenCL程序(创建程序时需要)，并且直接报告程序编译错误。
+
+表4.1 每个例子所涉及的OpenCL特性
+
+\par\medskip\noindent
+\begingroup\fontsize{9bp}{12.5bp}\selectfont\renewcommand{\arraystretch}{1.12}
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+例子 & OpenCL特性 \\
+\midrule
+直方图 & 局部内存，局部原子操作，全局原子操作，内存栅栏 \\
+图像旋转 & 图像，采样器 \\
+图像卷积 & C++ API，常量内存，图像，采样器 \\
+生产者-消费者 & 通道，多设备 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\endgroup
+\medskip
+
+
+
+% ---- 4.2-chinese.md ----
+\section{直方图}
+
+直方图是用来计数或可视化离散数据的频度(比如，出现次数)，直方图多用于图像处理。例如本节的例子，我们将创建一个直方图，其统计像素值不超过256-bit的图像。图4.1中，左边的图为输入，右边的图为产生好的直方图。例子中我们将使用局部内存，以及在OpenCL内核中使用局部和全局原子操作。
+
+\myGraphic{0.92}{images/chapter4/4-1.png}{图4.1 从一副256-bit图产生的直方图。直方图中显示了相关像素的频度。}
+
+理论上，直方图算法本身很简单。例子中，每个值都由自己对应的位置，直方图的实现如下：
+
+\begin{codebox}[cpp]
+int histogtam[HIST_BINS]
+
+main(){
+  for (each input value){
+    histogtam[value]++;
+  }
+}
+\end{codebox}
+
+与第3章的向量相加不同，直方图不那么容易并行，在多线程的状态下期中的自加操作将会导致竞争。不过，虽然效率有些低，但也可以使用原子加操作来完成直方图中的数据的自加操作。下面的伪代码，就完全能用多线程完成直方图的计算。
+
+\begin{codebox}[cpp]
+int histogtam[HIST_BINS]
+
+createHistogram(){
+  for (each of my value){
+    atomic_add(histogtam[value], 1);
+  }
+}
+
+main(){
+  for (number of threads){
+    spawn_thread(createHistogram);
+  }
+}
+\end{codebox}
+
+这个实现并不高效，因为其对每个像素都进行了原子操作。更高效的一种方式是使用局部直方图，其只统计该区域内的像素。当一个线程计算完成自己的局部直方图后，就会自动的加到全局直方图中。
+
+\begin{codebox}[cpp]
+int histogram[HIST_BINS]
+
+createHistogram(){
+
+  int localHistorgram[HIST_BINS];
+
+  for (each of my value){
+    localHistorgram[value]++;
+  }
+
+  for (each bin){
+    atomic_add(histogram[bin], localHistorgram[bin]);
+  }
+}
+
+main(){
+  for (number of threads){
+    spawn_thread(createHistogram);
+  }
+}
+\end{codebox}
+
+很多情况下，OpenCL的多线程和CPU多线程在原理上是一样的——不过二者的线程粒度有些不同。如将第一种多线程的方式换成OpenCL中的工作项来做，因为每个工作项都要对共享的全局内存使用原子操作，其执行效率也很低。第8章中，我们将了解到，全局变量的访问延迟要远高于寄存器和局部内存。如多线程的实现，如果有太多的线程访问同一个位置，那么这个程序的效率将会大大降低。
+
+不过，我们也不想在每个工作项中备份直方图。GPU工作项将私有数据存储到寄存器，当寄存器被占满，多于的私有变量会存储在全局内存中，这对于性能来说有弊无益。
+
+最好的办法就是在每个工作组中创建一份局部积分图。局部内存中的数据，每个工作组中的所有工作项都可以共享访问。局部内存一般会分布在GPU的片上内存中，其访问速度要比访问全局内存快的多。如同第二种CPU多线程算法，当工作组完成局部积分图时，其会传递给全局内存，并使用原子加操作将对应位置上的数据原子加到全局内存中。不过，这种实现方式也有问题：对局部内存的访问上存在条件竞争。这里需要你对目标设备的架构有所了解。对于很多GPU来说，原子操作访问局部内存的效率很高。在AMD Radeon GPU上，原子单元位于片上暂存式存储器中。因此，局部内存上的原子操作的效率要比全局原子操作的效率高很多。下面的例子中，我们将使用到局部原子操作来生成局部直方图。
+
+OpenCL内核的参考代码如下：
+
+\begin{codeboxt}[cpp]{代码清单4.1 计算直方图的OpenCL内核代码}
+#define HIST_BINS 256
+
+__kernel
+void histogram(__global int *data,
+                        int  numData,
+               __global int *histogram){
+
+  __local int localHistorgram[HIST_BINS];
+
+  int lid = get_local_id(0);
+  int gid = get_glaobal_id(0);
+
+  /* Initialize local histogram to zero */
+  for (int i = lid; i < HIST_BINS; i += get_local_size(0)){
+    localHistorgram[i] = 0;
+  }
+
+  /* Wait nutil all work-items within
+   * the work-group have completed their stores */
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  /* Compute local histogram */
+  for (int i = gid; i < numData; i += get_glaobal_size(0)){
+    atomic_add(&localHistorgram[data[i]], 1);
+  }
+
+  /* Wait nutil all work-items within
+   * the work-group have completed their stores */
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  /* Write the local histogram out to
+   * the global histogram */
+  for (int i = lid; i < HIST_BINS; i += get_glaobal_size(0)){
+    atomic_add(&histogram[i], localHistorgram[i]);
+  }
+}
+\end{codeboxt}
+
+代码清单4.1的实现中包含如下5步：
+
+\begin{enumerate}
+\item 初始化局部直方图内的值为0 (第14行)
+\item 同步工作项，确保相应的数据全部更新完毕 (第23行)
+\item 计算局部直方图 (第26行)
+\item 再次同步工作项，确保相应的数据全部更新完毕 (第35行)
+\item 将局部直方图写入到全局内存中 (第39行)
+\end{enumerate}
+
+1,3,5展示了如何在OpenCL中对内存共享区域(全局或局部内存)进行读写。当我们需要工作项需要访问不同的内存位置时，我们可以以工作项的唯一标识ID为基准，然后加上所有工作项的数量作为跨度(例如，工作组内以工作组中工作项的数量，计算对应工作项所要访问的局部内存位置。或以NDRange中的尺寸，访问全局内存)。第1步中，我们以工作组的尺寸为跨距，用来将局部直方图初始化为0。这就允许我们更加灵活的对工作组尺寸进行设置及配置，并且能保证现有模块功能的正确性。第3步中使用同样的方式读取全局内存中的数据，以及第5步中也以相同的方式将局部内存中的数据写出。
+
+第2和第4步使用栅栏对两步间的操作进行同步，其指定的内存栅栏，将同步工作组中的所有工作项。栅栏和内存栅栏将在第7章详细讨论。现在就能确保工作组中的所有工作项都要到达该栅栏处，只要有线程没有达到，已达到的线程就不能执行下面的操作。局部内存栅栏就是用来保证所有工作项都到达栅栏处，以代表局部直方图更新完毕。
+
+为了让全局直方图得到正确的结果，我们也需要对全局积分图进行初始化。可以在数组创建之后，直接使用主机端API \texttt{clEnqueueFillBuffer()}对数据进行初始化。\texttt{clEnqueueFillBuffer()}的参数列表如下:
+
+\begin{codebox}[cpp]
+cl_int
+clEnqueueFillBuffer(
+  cl_command_queue command_queue,
+  cl_mem buffer,
+  const void *pattern,
+  size_t offset,
+  size_t size,
+  cl_uint num_events_in_wait_list,
+  const cl_event *event_wait_list,
+  cl_event *event)
+\end{codebox}
+
+该API类似于C中的\texttt{memset()}函数。buffer参数就是要初始化的数组对象，具体的值由pattern指定。与\texttt{memset()}不同，pattern可以指定为任意的OpenCL支持类型，比如：标量、整型向量或浮点类型。pattern\_\allowbreak{}size用来指定pattern所占空间。size参数用来指定数组内初始化的字节数，其值必须是pattern\_\allowbreak{}size的整数倍。offset参数用来指定数组起始初始化的位置或偏移。
+
+除了初始化直方图数组部分，主机端代码与第3章向量相加的代码很类似。代码清单4.2提供了直方图统计主机端的完整代码。内核代码在代码清单4.1中，将其存成名为histogram.cl以供4.2中的代码使用。代码中有些工具函数在4.6节中会详细介绍。这些函数用于读写BMP文件，这里提供其源码的在线地址(\texthref{http://booksite.elsevier.com/9780128014141})
+
+\begin{codebox}[cpp]
+/* System includes */
+#include <stdio.h>
+#include <stdlib.h>
+#include <sting.h>
+
+/* OpenCL includes */
+#include <CL/cl.h>
+
+/* Utility functions */
+#include "utils.h"
+#include "bmp_utils.h"
+
+static const int HIST_BINS = 256;
+
+int main(int argc, char *argv[]){
+
+  /* Host data */
+  int *hInputImage = NULL;
+  int *hOutputHistogram = NULL;
+
+  /* Allocate space for the input image and read the
+   * data from disk */
+  int imageRows;
+  int imageCols;
+  hInputImage = readBmp("../../Images/cat.bmp", &imageRows, &imageCols);
+  const int imageElements = imageRows * imageCols;
+  const size_t imageSize = imageElements * sizeof(int);
+
+  /* Allocate space for the histogram on the host */
+  const int histogramSize = HIST_BINS * sizeof(int);
+  hOutputHistogram = (int *)malloc(histogramSize);
+  if (!hOutputHistogram){ exit(-1); }
+
+  /* Use this check the output of each API call */
+  cl_int status;
+
+  /* Get the first platform */
+  cl_platform_id platform;
+  status = clGetPlatformIDs(1, &platform, NULL);
+  check(status);
+
+  /* Get the first device */
+  cl_device_id device;
+  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+  check(status);
+
+  /* Create a command-queue and associate it with the device */
+  cl_command_queue cmdQueue;
+  context = clCreateContext(NULL, 1, &device, NULL, NULL, &status);
+  check(status);
+
+  /* Create a buffer object for the output histogram */
+  cl_mem bufOutputHistogram;
+  bufOutputHistogram = clCreateBuffer(context, CL_MEM_WRITE_ONLY, histogramSize, NULL, &status);
+  check(status);
+
+  /* Write the input image to the device */
+  status = clEnqueueWriteBuffer(cmdQueue, bufInputImage, CL_TRUE, 0, imageSize, hInputImage, 0, NULL, NULL);
+  check(status);
+
+  /* Initialize the output histogram with zero */
+  int zero = 0;
+  status = clEnqueueFillBuffer(cmdQueue, bufOutputHistogram, &zero, sizeof(int), 0, histogramSize, 0, NULL, NULL);
+  check(status);
+
+  /* Create a program with source code */
+  char *programSource = readFile("histogram.cl");
+  size_t prograSourceLen = strlen(programSource);
+  cl_program program = clCreateProgramWithSouce(context, 1, (const char **)&programSource, &prograSourceLen, &status);
+  check(status);
+
+  /* Build (compile) the program for the device */
+  status = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+  if (status != CL_SUCCESS){
+    printCompilerError(program, device);
+    exit(-1);
+  }
+
+  /* Create the kernel */
+  cl_kernel kernel;
+  kernel = clCreateKernel(program, "histogram", &status);
+  check(status);
+
+  /* Set the kernel arguments */
+  status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufInputImage);
+  status |= clSetKernelArg(kernel, 1, sizeof(int), &imageElements);
+  status |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &bufOutputHistogram);
+
+  /* Define the index space and work-group size */
+  size_t globalWorkSize[1];
+  globalWorkSize[0] = 1024;
+
+  size_t localWorkSize[1];
+  localWorkSize[0] = 64;
+
+  /* Enqueue the kernel for execution */
+  status = clEnqueueNDRangeKernel(cmdQueue, kernel, 1, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);
+  check(status);
+
+  /* Read the output histogram buffer to the host */
+  status = clEnqueuReadBuffer(cmdQueue, bufOutputHistogram, CL_TRUE, 0, histogramSize, hOutputHistogram, 0, NULL, NULL);
+  check(status);
+
+  /* Free OpenCL resources */
+  clReleaseKernel(kernel);
+  clReleaseProgram(program);
+  clReleaseCommandQueue(cmdQueue);
+  clReleaseMemObject(bufInputImage);
+  clReleaseMemObject(bufOutputHistogram);
+  clReleaseContext(context);
+
+  /* Free host resource */
+  free(hInputImage);
+  free(hOutputHistogram);
+  free(programSource);
+
+  return 0;
+}
+\end{codebox}
+
+代码清单4.2 直方图统计的主机端代码。注意，check(cl\_\allowbreak{}int status)是用来检查之前执行命令的状态是否为CL\_\allowbreak{}SUCCESS。
+
+
+
+% ---- 4.3-chinese.md ----
+\section{图像旋转}
+
+旋转在常规的图像处理中都会用到，比如在图形匹配、图像对齐，以及其他基于图像的算法。本节旋转例子的输入是一张图，输出是一张旋转了Θ度的图。旋转完成后，就如同图4.2中所示。
+
+\myGraphic{0.92}{images/chapter4/4-2.png}{图4.2 旋转了45°的图像。超出图像范围的部分会返回黑色像素。}
+
+假设其中一个像素点的坐标为(x, y)，中心旋转点的坐标为(x0, y0)，当原始坐标旋转Θ度时，该点的新坐标为(x', y')。这些数据的计算公式如下所示：
+
+\begin{codebox}[text]
+x' = cosΘ(x - x0) + sinΘ(y - y0)
+y' = -sinΘ(x - x0) + cosΘ(y - y0)
+\end{codebox}
+
+根据以上的等式，可以清楚的了解每个像素点坐标的计算都是独立的。注意，每个输入和输出的坐标值不一定是整数。因此，我们就要利用OpenCL内置函数支持浮点坐标计算，并且内部支持的线性差值方式也能生成高质量的输出图像。
+
+如果将工作项映射到输出图像的位置上，那么工作项的全局ID就对应着输出的(x', y')，并使用上面的等式进行计算。该例子中我们以图像的中间点，作为旋转中心点。根据之前的等式，我们能推算出原始的坐标位置，以便每个工作项完成其计算：
+
+\begin{codebox}[text]
+x = x'cosΘ - y'sinΘ + x0
+y = x'sinΘ + y'cosΘ + y0
+\end{codebox}
+
+相关的OpenCL C伪代码如下：
+
+\begin{codebox}[cpp]
+gidx = get_global_id(0);
+gidy = get_global_id(1);
+x0 = width / 2;
+y0 = height / 2;
+x = gidx * cos(theta) - gidy * sin(theta) + x0
+y = gidx * sin(theta) + gidy * cos(theta) + y0
+\end{codebox}
+
+代码清单4.3中展示了如何使用OpenCL内核处理图像旋转。第3章，我们提到过图像，其对象对编程者是不透明，必须使用相关类型的内置函数。这个内核代码中，我们使用了\texttt{read\_imagef()}(第38行)用来处理浮点数据。如同所有用来访问图像的函数一样，\texttt{read\_imagef()}会返回一个具有4个元素的矢量类型。当我们对单通道数据进行处理(会在之后进行描述)，我们只需要在读取函数之后访问.x即可(第38行)。当我们调用写入图像的函数时，会将一个具有4个元素的矢量直接写入图像中，而不管数据实际的类型，这里就需要硬件进行适当的处理。因此，在调用\texttt{write\_imagef()}时，我们必须将结果转换为一个float4矢量类型(第41行)。
+
+\begin{codeboxt}[cpp]{代码清单4.3 图像旋转内核}
+__constant sampler_t sampler =
+  CLK_NORMALIZED_COORDS_FALSE |
+  CLK_FILTER_LINEAR           |
+  CLK_ADDRESS_CLAMP;
+
+__kernel
+void rotation(
+  __read_only image2d_t inputImage,
+  __write_only image2d_t ouputImage,
+  int imageWidth,
+  int imageHeigt,
+  float theta)
+{
+  /* Get global ID for ouput coordinates */
+  int x = get_global_id(0);
+  int y = get_global_id(1);
+
+  /* Compute image center */
+  float x0 = imageWidth / 2.0f;
+  float y0 = imageHeight / 2.0f;
+
+  /* Compute the work-item's location relative
+   * to the image center */
+  int xprime = x - x0;
+  int yprime = y - y0;
+
+  /* Compute sine and cosine */
+  float sinTheta = sin(theta);
+  float cosTheta = cos(theta);
+
+  /* Compute the input location */
+  float2 readCoord;
+  readCoord.x = xprime * cosTheta - yprime * sinTheta + x0;
+  readCoord.y = xprime * sinTheta + yprime * cosTheta + y0;
+
+  /* Read the input image */
+  float value;
+  value = read_imagef(inputImage, sampler, readCoord).x;
+
+  /* Write the output image */
+  write_imagef(outputImage, (int2)(x, y), (float4)(value, 0.f, 0.f, 0.f));
+}
+\end{codeboxt}
+
+内核4.3代码中使用图像采样器(sampler\_\allowbreak{}t sampler)，用来描述如何访问图像。采样器指定如何处理访问到的图像位置，比如，当访问到图像之外的区域，或是当访问到多个坐标时，不进行差值操作。
+
+访问到的坐标不是就被标准化(比如，取值范围在0到1之间)，就是使用基于像素值地址。使用CLK\_\allowbreak{}NORMALIZED\_\allowbreak{}COORDS\_\allowbreak{}FALSE标识指定基于像素地址的寻址。OpenCL支持很多用于处理跨边界访问寻址方式。本节例程中，我们将是用CL\_\allowbreak{}ADDRESS\_\allowbreak{}CLAMP用来指定，当访问到图像之外的区域，会将RGB三个通道的值设置成0，并且将A通道设置成1或0(由图像格式决定)。所以，超出范围的像素将会返回黑色。最后，采样器允许我们指定一种过滤模式。过滤模式将决定将如何返回图像所取到的值。选项CLK\_\allowbreak{}FILTER\_\allowbreak{}NEAREST只是简单的返回离所提供左边最近的图像元素。或者使用CLK\_\allowbreak{}FILTER\_\allowbreak{}LINEAR将坐标附近的像素进行线性差值。本节图像旋转的例子中，我们将使用线性差值的方式提供质量更加上乘的旋转图像。
+
+之前版本的OpenCL中，全局工作项的数量是由NDRange进行配置，每个维度上工作项的数量必须是工作组数量的整数倍。通常，这就会导致NDRange设置的大小要远大于已经映射的数据。当访问到图像外区域时，编程者不得不传入元数据到内核当中去，用于判断每个工作项所访问到的位置是否合法——本节例子中，就需要将图像的宽和高传入内核当中。访问到非法位置的工作项将不参与计算，有时这样的做法将使内核代码变得奇怪或低效。OpenCL 2.0标准中，设备所需的NDRange中，工作组尺寸在图像边界处可变。这就用到\emph{剩余工作组}(remainder work-groups)的概念，第5章还会继续讨论。将OpenCL的性能特性使用到代码清单4.3中，将会使代码简单高效。
+
+之前的例子中，创建程序对象的过程与向量相加中创建程序对象的过程很类似。不过本节的例子中我们在内核中使用的是图像。从一副图中读取图像后，我们将其元素转换为单精度浮点类型，并将其作为OpenCL图像对象的数据来源。
+
+分配图像对象的工作由clCreateImage() API完成。创建图像时，需要指定其维度(1,2,3维)，并且设置其图像空间大小，这些都由图像描述器(类型为cl\_\allowbreak{}image\_\allowbreak{}desc)对象来完成。像素类型和通道布局都有图像格式(类型为cl\_\allowbreak{}image\_\allowbreak{}format)来指定。图像中所存储的每个元素都为四通道，分别为R,G,B和A通道。因此，一个图像将使用CL\_\allowbreak{}RGBA来表示，其每个元素向量中通道的顺序。或者，一副图像中的每个像素只用一个值来表示(比如：灰度缩放图或数据矩阵)，数据需要使用CL\_\allowbreak{}R来指定图像为单通道。当在数据格式中指定数据类型，并通过签名和尺寸组合标识的方式来指定整数类型。例如，CL\_\allowbreak{}SIGNED\_\allowbreak{}INT32代表32位有符号整型数据，CL\_\allowbreak{}UNSIGNED\_\allowbreak{}INT8与C语言中无符号字符类型一样。单精度浮点数据，可以使用CL\_\allowbreak{}FLOAT指定，并且这个标识用在了本节的例子中。
+
+代码清单4.4展示了在主机端创建输入和输出图像的例子。图像对象创建完成之后，我们使用\texttt{clEnqueueWriteImage()}将主机端的输入数据传输到图像对象当中。
+
+\begin{codeboxt}[cpp]{代码清单4.4 为旋转例程创建图像对象}
+/* The image descriptor describes how the data will be stored
+ * in memory. This descriptor initializes a 2D image with no pitch */
+cl_image_desc desc;
+desc.image_type = CL_MEM_OBJECT_IMAGE2D;
+desc.image_width = width;
+desc.image_height = height;
+desc.image_depth = 0;
+desc.image_array_size = 0;
+desc.image_row_pitch = 0;
+desc.image_slice_pitch = 0;
+desc.num_mip_levels = 0;
+desc.num_samples = 0;
+desc.buffer = NULL;
+
+/* The image format descibes the properties of each pixel */
+cl_image_format format;
+format.image_channel_order = CL_R; // single channel
+format.image_channel_data_type = CL_FLOAT;
+
+/* Create the input image and initialize it using a
+ * pointer to the image data on the host */
+cl_mem inputImage = clCreateImage(context, CL_MEM_READ_ONLY, &format, &desc, NULL, NULL);
+
+/* Create the output image */
+cl_mem ouputImage = clCreateImage(context, CL_MEM_WRITE_ONLY, &formatm, &desc, NULL, NULL);
+
+/* Copy the host image data to the device */
+size_t origin[3] = {0,0,0}; // Offset within the image to copy form
+size_t region[3] = {width, height, 1}; // Elements to per dimension
+clEnqueueWriteImage(queue, inputImage, CL_TRUE,
+  origin, region, 0 /* row-pitch */, 0 /* slice-pitch */,
+  hostInputImage, 0, NULL, NULL);
+\end{codeboxt}
+
+旋转例程的完整代码在代码清单4.5中展示。
+
+\begin{codeboxt}[cpp]{代码清单4.5 图像旋转主机端的完整代码}
+/* System includes */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* OpenCL includes */
+#include <CL/cl.h>
+
+/* Utility functions */
+#include "utils.h"
+#include "bmp-utils.h"
+
+int main(int argc, char **argv)
+{
+  /* Host data */
+  float *hInputImage = NULL;
+  float *hOutputImage = NULL;
+
+  /* Angle for rotation (degrees) */
+  const float theta = 45.f;
+
+  /* Allocate space for the input image and read the
+   * data from disk */
+  int imageRows;
+  int imageCols;
+  hInputImage = readBmpFloat("cat.bmp", &imageRow, &imageCols);
+  const int imageElements = imageRows * imageCols;
+  const size_t imageSize = imageElements * sizeof(float);
+
+  /* Allocate space for the ouput image */
+  hOutputImage = (float *)malloc(imageSize);
+  if (!hOutputImage){ exit(-1); }
+
+  /* Use this to check the output of each API call */
+  cl_int status;
+
+  /* Get the first platform */
+  cl_platform_id platform;
+  status = clGetPlatformIDs(1, &platform, NULL);
+  check(status);
+
+  /* Get the first device */
+  cl_device_id device;
+  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+  check(status);
+
+  /* Create a context and associate it with the device */
+  cl_context context;
+  context = clCreateContext(NULL, 1, &device, NULL, NULL, &status);
+  check(status);
+
+  /* Create a command-queue and associate it with the device */
+  cl_command_queue cmdQueue;
+  cmdQueue = clCreateCommandQueue(context, device, 0, &status);
+  check(status);
+
+  /* The image descriptor describes how the data will be stored
+   * in memory. This descriptor initializes a 2D image with no pitch */
+  cl_image_desc desc;
+  desc.image_type = CL_MEM_OBJECT_IMAGE2D;
+  desc.image_width = width;
+  desc.image_height = height;
+  desc.image_depth = 0;
+  desc.image_array_size = 0;
+  desc.image_row_pitch = 0;
+  desc.image_slice_pitch = 0;
+  desc.num_mip_levels = 0;
+  desc.num_samples = 0;
+  desc.buffer = NULL;
+
+  /* The image format describes the properties of each pixel */
+  cl_image_format format;
+  format.image_channel_order = CL_R; // single channel
+  format.image_channel_data_type = CL_FLOAT;
+
+  /* Create the input image and initialize it using a
+   * pointer to the image data on the host */
+  cl_mem inputImage = clCreateImage(context, CL_MEM_READ_ONLY, &format, &desc, NULL, NULL);
+
+  /* Create the ouput image */
+  cl_mem outputImage = clCreateImage(context, CL_MEM_WRITE_ONLY, &format, &desc, NULL, NULL);
+
+  /* Copy the host image data to the device */
+  size_t origin[3] = {0,0,0}; // Offset within the image to copy from
+  size_t region[3] = {imageCols, imageRows, 1}; // Elements to per dimension
+  clEnqueueWriteImage(cmdQueue, inputImage, CL_TRUE,
+    origin, region, 0 /* row-pitch */, 0 /* slice-pitch */, hInputImage, 0, NULL, NULL);
+
+  /* Create a program with source code */
+  char *programSource = readFile("image-rotation.cl");
+  size_t programSourceLen = strlen(programSource);
+  cl_program program = clCreateProgramWithSource(context, 1, (const char **)&programSource, &programSourceLen, &status);
+  check(status);
+
+  /* Build (compile) the program for the device */
+  status = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+  if (status != CL_SUCCESS){
+    printCompilerError(program, device);
+    exit(-1);
+  }
+
+  /* Create the kernel */
+  cl_kernel kernel;
+  kernel = clCreateKernel(program, "rotation", &status);
+  check(status);
+
+  /* Set the kernel arguments */
+  status = clSetkernelArg(kernel, 0, sizeof(cl_mem), &inputImage);
+  status |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &outputImage);
+  status |= clSetKernelArg(kernel, 2, sizeof(int), &imageCols);
+  status |= clSetKernelArg(kernel, 3, sizeof(int), &imageRows);
+  status |= clSetKernelArg(kernel, 4, sizeof(float), &theta);
+  check(status);
+
+  /* Define the index space and work-group size */
+  size_t globalWorkSize[2];
+  globalWorkSize[0] = imageCols;
+  globalWorkSize[1] = imageRows;
+
+  size_t localWorkSize[2];
+  localWorkSize[0] = 8;
+  localWorkSize[1] = 8;
+
+  /* Enqueue the kernel for execution */
+  status = clEnqueueReadImage(cmdQueue, outputImage, CL_TRUE, origin, region, 0 /* row-pitch */, 0 /* slice-pitch */, hOutputImage, 0, NULL, NULL);
+  check(status);
+
+  /* Write the output image to file */
+  writeBmpFloat(hOutputImage, "rotated-cat.bmp", imageRows, imageCols, "cat.bmp");
+
+  /* Free OpenCL resources */
+  clReleaseKernel(kernel);
+  clReleaseProgram(program);
+  clReleaseCommandQueue(cmdQueue);
+  clReleaseMemObject(inputImage);
+  clReleaseMemObject(outputImage);
+  clReleaseContext(context);
+
+  /* Free host resources */
+  free(hInputImage);
+  free(hOutputImage);
+  free(programSource);
+
+  return 0;
+}
+\end{codeboxt}
+
+
+
+% ---- 4.4-chinese.md ----
+\section{图像卷积}
+
+卷积在图像处理中经常用到，其会根据每个像素周围的像素点修改当前像素点的值。卷积核就是用来描述每个像素点如何被附近的像素点所影响。例如，模糊滤波中，使用平均的权重方式来进行计算，这样差异比较大的像素点会减少差异。对于相同的图像，如果想要做不同的操作，我们只需要变化滤波器即可，这样就能做锐化、模糊、边缘增强和图像压花。
+
+卷积算法会遍历原始图像中的每一个像素点。对于每个原始像素点，滤波器中心点会为于像素点的上方，然后将中心点以及周围点的像素点与滤波器中对应的权重值相乘。然后将乘积的结果值相加后，产生出新的值作为输出。图4.3中就展示了该算法的具体过程。
+
+\myGraphic{0.92}{images/chapter4/4-3.png}{图4.3 卷积滤波如何对原图像进行处理。}
+
+图4.4a是原始图，图4.4b中展示了原图经过模糊滤波后的结果，图4.4c展示了经过一个压花滤波器处理后的结果。
+
+\myGraphic{0.92}{images/chapter4/4-4.png}{图4.4 不同卷积核对同一张图像进行处理：a)为原图；b)为模糊处理；c)为压花处理。}
+
+程序清单4.6中使用\texttt{C/C++}实现了一个串行的卷积操作。两层外部循环以遍历原始图像中所有的像素点。每一次滤波操作，每个原始点和其附近的点都要参与计算。需要注意的是，滤波器有可能访问到原始图像之外的区域。为了解决这个问题，我们在最内层循环中添加了四个显式的检查，当滤波器对应的坐标点位于原始图像之外，我们将使用与其最近的原始图像的边界值。
+
+\begin{codebox}[cpp]
+/* Iterate over the rows of the source image */
+for (int i = 0; i < rows; i++)
+{
+  /* Iterate over the columns of the source image */
+  for (int j = 0; j < cols; j++)
+  {
+    /* Reset sum for new source pixel */
+    int sum = 0;
+
+    /* Apply the filter to the neighborhood */
+    for (int k = -halfFilterWidth; k <= halfFilterWidth; k++)
+    {
+      for (int l = -halfFilterWidth; l <= halfFilterWidth; l++)
+      {
+        /* Indices used to access the image */
+        int r = i+k;
+        int c = j+l;
+
+        /* Handle out-of-bounds locations by clamping to
+         * the border pixel*/
+        r = (r < 0)? 0 : r;
+        c = (c < 0)? 0 : c;
+        r = (r >= rows)? rows - 1: r;
+        c = (c >= cols)? cols - 1: c;
+
+        sum += Image[r][c] *
+               Filter[k+halfFilterWidth][l+halfFilterWidth];
+      }
+    }
+
+    /* Write the new pixel value */
+    outputImage[i][j] = sum;
+  }
+}
+\end{codebox}
+
+程序清单4.6 图像卷积的串行版本
+
+OpenCL中，使用图像内存对象处理卷积操作要比使用数组内存对象更有优势。图像采样方式会自动对访问到图像之外的区域进行处理(类似于上节图像转换中所提到的)，并且访问缓存中二维数据在硬件上也会有所优化(将会在第7章讨论)。
+
+OpenCL上实现卷积操作几乎没有什么难度，并且写法类似于卷积操作的C版本。OpenCL版本中，我们为每一个输出的像素点创建了一个工作项，使用并行的方式将最外层两个循环去掉。那么每个工作项的任务就是完成最里面的两个循环，这两个循环完成的就是滤波操作。前面的例子中，读取源图像数据，需要配置一个OpenCL结构体，来指定数据的类型。本节的例子中，将继续使用\texttt{read\_imagef()}。完整的内核代码将在代码清单4.7中展示。
+
+\begin{codebox}[cpp]
+__kerenl
+void convolution(
+  __read_only image2d_t inputImage,
+  __write_only image2d_t outputImage,
+  int rows,
+  int cols,
+  __consetant float *filter,
+  int filterWidth,
+  sampler_t sampler)
+{
+  /* Store each work-item's unique row and column */
+  int column = get_global_id(0);
+  int row = get_global_id(1);
+
+  /* Half the width of the filter is needed for indexing
+   * memory later */
+  int halfWidth = (int)(filterWidth / 2);
+
+  /* All accesses to images return data as four-element vectors
+   * (i.e., float4), although only the x component will contain
+   * meaningful data in this code */
+  float4 sum = {0.0f,0.0f,0.0f,0.0f};
+
+  /* Iterator for the filter */
+  int filterIdx = 0;
+
+  /* Each work-item iterates around its local area on the basis of the
+   * size of the filter*/
+  int2 coords; // Coordinates for accessing the image
+
+  /* Iterate the filter rows*/
+  for (int i = -halfWidth; i <= halfWidth; i++)
+  {
+    coords.y = row + i;
+    /* Iterate over the filter columns */
+    for (int j = -halfWidth; j <= halfWidth; j++)
+    {
+      coords.x - column + 1;
+
+      /*Read a pixel from the image. A single-channel image
+       * stores the pixel in the x coordinate of the reatured
+       * vector. */
+      pixel = read_imagef(inputImage, sampler, coords);
+      sum.x += pixel.x * filter[filterIdx++];
+
+    }
+  }
+
+  /* Copy the data to the output image */
+  coords.x = column;
+  coords.y = row;
+  write_imagef(outputImage, coords, sum);
+}
+\end{codebox}
+
+程序清单4.7 使用OpenCL C实现的图像卷积
+
+访问图像总会返回具有四个值的向量(每个通道一个值)。前节例子中，我们加了\texttt{.x}来表示只需要返回值的第一个元素。本节例子中，我们会申明pixel(图像访问之后返回的值)和sum(存储结果数据，以拷贝到输出图像)，其类型都为float4。当然，我们仅对x元素进行累加滤波像素值的计算(第45行)。
+
+卷积核很适合放置到常量内存上，因为所有工作项所要用到的卷积核都是相同的。简单的添加关键字"\_\allowbreak{}\_\allowbreak{}costant"在函数参数列表中(第7行)，用于表示卷积核存放在常量内存中。
+
+之前的例子中，我们是直接在内核内部创建了一个采样器。本节例子中，我们将使用主机端API创建一个采样器，并将其作为内核的一个参数传入。同样，本节例子中我们将使用C++ API(C++采样器构造函数需要相同的参数)。
+
+主机端创建采样器的API如下所示：
+
+\begin{codebox}[cpp]
+cl_sampler clCreateSampler(
+  cl_context context,
+  cl_bool normalized_coords,
+  cl_addressing_mode addressing_mode,
+  cl_filter_mode filter_mode,
+  cl_int *errcode_ret)
+\end{codebox}
+
+其C++ API如下所示：
+
+\begin{codebox}[cpp]
+cl::Sampler::Sampler(
+  const Context &context,
+  cl_bool normalized_coords,
+  cl_addressing_mode addressing_mode,
+  cl_filter_mode filter_mode,
+  cl_int *err = NULL)
+\end{codebox}
+
+使用C++创建采样器的方式如下所示：
+
+\begin{codebox}[cpp]
+cl::Sampler sampler = new cl::Sampler(context, CL_FALSE, CL_ADDRESS_CLAMP_TO_EDGE, CL_FILTER_NEAREST);
+\end{codebox}
+
+图像旋转例子中，采样器使用非标准化坐标。这里我们将展示不同于内部使用时的另外两个采样器参数：滤波模式将使用最近的像素点的值，而非进行差值后的值(CL\_\allowbreak{}FILTER\_\allowbreak{}NEAREST)，并且寻址模式将在访问到图像区域之外时，将其值置为最接近的图像边界值(CL\_\allowbreak{}ADDRESS\_\allowbreak{}CLAMP\_\allowbreak{}TO\_\allowbreak{}EDGE)。(注：这里要注意一下CL和CLK的区别。CL开头的是使用在主机端API上，CLK则直接使用在OpenCL内核代码中。)
+
+使用C++ API，创建二维图像使用image2D类进行创建，创建这个类需要一个ImageFormat对象作为参数。C API则不需要图像描述器的传入。
+
+Image2D和ImageFormat的构造函数如下：
+
+\begin{codebox}[cpp]
+cl::Image2D::Image2D(
+  Context& context,
+  cl_mem_flags flags,
+  ImageFormat format,
+  ::size_t width,
+  ::size_t height,
+  ::size_t row_pitch = 0,
+  void *host_ptr = NULL,
+  cl_int *err = NULL)
+
+cl::ImageFormat::ImageFormat(
+  cl_channel_order order,
+  cl_channel_type type)
+\end{codebox}
+
+这样我们就能创建卷积所需要的输入和输出图像，其调用方式如下所示：
+
+\begin{codebox}[cpp]
+cl::ImageFormat imageFormat = cl::ImageFormat(CL_R, CL_FLOAT);
+cl::Image2D inputImage = cl::Image2D(context, CL_MEM_READ_ONLY, imageFormat, imageCols, imageRows);
+cl::Image2D outputImage = cl::Image2D(context, CL_MEM_WRITE_ONLY, imageFormat, imageCols, imageRows);
+\end{codebox}
+
+使用C++ API实现图像卷积的主机端代码在代码清单4.8中展示。主程序中，使用了一个5x5的高斯模糊滤波核用于卷积处理。
+
+\begin{codebox}[cpp]
+#define __CL_ENABLE_EXCEPTIONS
+
+#include <CL/cl.hpp>
+#include <fstream>
+#include <iostream>
+#include <vector>
+
+#include "utils.h"
+#include "bmp_utils.h"
+
+static const char *inputImagePath = "../../Images/cat.bmp";
+
+static float gaussianBlurFilter[25] = {
+  1.0f / 273.0f, 4.0f / 273.0f, 7.0f / 273.0f, 4.0f / 273.0f, 1.0f / 273.0f,
+  4.0f / 273.0f, 16.0f / 273.0f, 26.0f / 273.0f, 16.0f / 273.0f, 4.0f / 273.0f,
+  7.0f / 273.0f, 26.0f / 273.0f, 41.0f / 273.0f, 26.0f / 273.0f, 7.0f / 273.0f,
+  4.0f / 273.0f, 16.0f / 273.0f, 26.0f / 273.0f, 16.0f / 273.0f, 4.0f / 273.0f,
+  1.0f / 273.0f, 4.0f / 273.0f, 7.0f / 273.0f, 4.0f / 273.0f, 1.0f / 273.0f
+};
+static const int gaussianBlurFilterWidth = 5;
+
+int main()
+{
+  float *hInputImage;
+  float *hOutpueImage;
+
+  int imageRows;
+  int imageCols;
+
+  /* Set the filter here */
+  int filterWidth = gaussianBlurFilterWidth;
+  float *filter = gaussianBlurFilter;
+
+  /* Read in the BMP image */
+  hInputImage = readBmpFloat(inputImagePath, &imageRows, &imageCols);
+
+  /* Allocate space for the output image */
+  hOutputImage = new float[imageRows * imageCols];
+
+  try
+  {
+    /* Query for platforms */
+    std::vector<cl::Platform> platforms;
+    cl::Platform::get(&platdorms);
+
+    /* Get a list of devices on this platform */
+    std::vector<cl::Device> device;
+    platforms[0].getDevices(CL_DEVICE_TYPE_GPU, &devices);
+
+    /* Create a context for the devices */
+    cl::Context context(devices);
+
+    /* Create a command-queue for the first device */
+    cl::CommandQueueu queue = cl::CommandQueue(context, devices[0]);
+
+    /* Create the images */
+    cl::ImageFormat imageFormat = cl::ImageFormat(CL_R, CL_FLOAT);
+    cl::Image2D inputImage = cl::Image2D(context, CL_MEM_READ_ONLY,
+        imageFormat, imageCols, imageRows);
+    cl::Image2D outputImage = cl::Image2D(context,
+        CL_MEM_WRITE_ONLY,
+        imageFormat, imageCols, imageRows);
+
+    /* Create a buffer for the filter */
+    cl::Buffer filterBuffer = cl::Buffer(context, CL_MEM_READ_ONLY,
+    filterWidth * filterWidth * sizeof(float));
+
+    /* Copy the input data to the input image */
+    cl::size<3> origin;
+    origin[0] = 0;
+    origin[1] = 0;
+    origin[2] = 0;
+    cl::size<3> region;
+    region[0] = 0;
+    region[1] = 0;
+    region[2] = 0;
+    queue.enqueueWriteImage(inputImage, CL_TRUE, origin, region,
+    0, 0,
+    hInputImage);
+
+    /* Copy the filter to the buffer*/
+    queue.enqueueWriteBuffer(filterBuffer, CL_TRUE, 0,
+    filterWidth * filterWidth * sizeof(float), filter);
+
+    /* Create the sampler */
+    cl::Sampler sampler = cl::Sampler(context, CL_FALSE,
+    CL_ADDRESS_CLAMP_TO_EDGE, CL_FILTER_NEAREST);
+
+    /* Read the program source */
+    std::ifstream sourceFile("image-convolution.cl");
+    std::string sourceCode(std::istreambuf_iterator<char>(sourceFile),
+    (std::istreambuf_iterator<char>()));
+
+    cl::Program::Source source(1,
+      std::make_pair(sourceCode.c_str(),
+      sourceCode.length() + 1));
+
+    /* Make program form the source code */
+    cl::Program program = cl::Program(context, source);
+
+    /* Create the kernel */
+    cl::Kernel kernel(program, "convolution");
+
+    /* Set the kernel arguments */
+    kernel.setArg(0, inputImage);
+    kernel.setArg(1, ouputImage);
+    kernel.setArg(2, filterBuffer);
+    kernel.setArg(3, filterWIdth);
+    kernel.setArg(4, sampler);
+
+    /* Execute the kernel */
+    cl::NDRange global(imageCols, imageRows);
+    cl::NDRange local(8, 8);
+    queue.enqueueNDRangeKernel(kernel, cl::NullRange, global,
+    local);
+    /* Copy the output data back to the host */
+    queue.enqueueReadImage(outputImage, CL_TRUE, origin, region,
+    0, 0,
+    hOutputImage);
+
+    /* Save the output BMP image */
+    writeBmpFloat(hOutputImage, "cat-filtered.bmp", imageRows, imageCols, inputImagePath);
+  }
+  catch(cl::Error error){
+    std::cout << error.what() << "(" << error.err() << ")" << std::endl;
+  }
+
+  free(hInputImage);
+  delete hOutputImage;
+  return 0;
+}
+\end{codebox}
+
+程序清单4.8 图像卷积主机端完整代码
+
+
+
+% ---- 4.5-chinese.md ----
+\section{生产者-消费者}
+
+很多OpenCL应用中，前一个内核的输出可能就会作为下一个内核的输入。换句话说，第一个内核是\textbf{生产者}，第二个内核是\textbf{消费者}。很多应用中生产者和消费者是并发工作的，生产者只将产生的数据交给消费者。OpenCL 2.0中提供管道内存对象，用来帮助生产者-消费者这样的应用。管道所提供的潜在功能性帮助，无论生产者-消费者内核是串行执行或并发执行。
+
+本节中，我们将使用管道创建一个生产者-消费者应用，其中生产者和消费者分别用内核构成，这两个内核使用的是本章前两个例子：卷积和直方图。卷积内核将会对图像进行处理，然后使用管道将输出图像传入直方图内核中(如图4.5所示)。为了描述额外的功能，展示管道如何使用处理单元提高应用效率。本节的例子我们将使用多设备完成。卷积内核将执行在GPU设备上，直方图内核将执行在CPU设备上。多个设备上执行内核可以保证两个内核能够并发执行，其中管道就用来传输生产者需要的数据(且为消费者需要的数据)。对于管道对象的详细描述将在第6章展开。那么现在，让我们来了解一下本节例子的一些基本需求。
+
+管道内存中的数据(称为packets)组织为先入先出(FIFO)结构。管道对象的内存在全局内存上开辟，所以可以被多个内核同时访问。这里需要注意的是，管道上存储的数据，主机端无法访问。
+
+内核中管道属性可能是只读(\_\allowbreak{}\_\allowbreak{}read\_\allowbreak{}only)或只写(\_\allowbreak{}\_\allowbreak{}write\_\allowbreak{}only)，不过不能是读写。如果管道对象没有指定是只读或只写，那么编译器将默认其为只读。管道在内核的参数列表中，通过使用关键字\texttt{pipe}进行声明，后跟数据访问类型，和数据包的数据类型。例如，\texttt{pipe \_\_read\_only float *input}将会创建一个只读管道，该管道中包含的数据为单精度浮点类型。
+
+\myGraphic{0.92}{images/chapter4/4-5.png}{图4.5 生产者内核将滤波后生成的像素点，通过管道传递给消费者内核，让消费者内核产生直方图：(a)为原始图像;(b)为滤波后图像;(c)为生成的直方图。}
+
+为了访问管道，OpenCL C提供内置函数\texttt{read\_pipe()}和\texttt{write\_pipe()}：
+
+\begin{codebox}[cpp]
+int read_pipe(pipe gentype p, gentype *ptr);
+int write_pipe(pipe gentype p, const gentype *ptr);
+\end{codebox}
+
+当一个工作项调用\texttt{read\_pipe()}(程序清单4.10，第16行)，一个包将从管道p中读取到ptr中。如果包读取正常，该函数返回0；如果管道为空，则该函数返回一个负值。\texttt{write\_pipe()}(程序清单4.9，第50行)与读取类似，会将ptr上的包写入到管道p中。如果包写入正常，该函数返回0；如果管道已满，则该函数返回一个负值
+
+程序清单4.9和4.10展示了我们应用中内核的实现。当我们指定目标消费者内核运行在CPU时，那么只有一个工作项去创建直方图。同样，当我们显式的指定一个CPU，我们需要之间将直方图的结果存放在全局内存中(第8章将对这样的权衡做更细化的讨论)。
+
+\begin{codebox}[cpp]
+__constant sampler_t sampler =
+  CLK_NORMALIZED_COORDS_FALSE |
+  CLK_FILTER_NEAREST          |
+  CLK_ADDRESS_CLAMP_TO_EDGE;
+
+__kernel
+void producerKernel(
+  image2d_t __read_only inputImage,
+  pipe __write_only float *outputPipe,
+  __constant float *filter,
+  int filterWidth)
+{
+  /* Store each work-item's unique row and column */
+  int column = get_global_id(0);
+  int row = get_global_id(1);
+
+  /* Half the width of the filter is needed for indexing
+   * memory later*/
+  int halfWidth = (int)(filterWidth / 2);
+
+  /* Used to hold the value of the output pixel */
+  float sum = 0.0f;
+
+  /* Iterator for the filter */
+  int filterIdx = 0;
+
+  /* Each work-item iterates around its local area on the basis of the
+   * size of the filter */
+  int2 coords; // Coordinates for accessing the image
+
+  /* Iterate the filter rows */
+  for (int i = -halfWidth; i <= halfWidth; i++)
+  {
+    coords.y = row + i;
+    /* Iterate over the filter columns */
+    for (int j = -halfWidth; j <= halfWidth; j++)
+    {
+      coords.x = column + j;
+
+      /* Read a pixel from the image. A single channel image
+       * stores the pixel in the x coordinate of the returned
+       * vector. */
+      float4 pixel;
+      pixel = read_imagef(inputImage, sampler, coords);
+      sum += pixel.x * filter[filterIdx++];
+    }
+  }
+
+  /* Write the output pixel to the pipe */
+  write_pipe(outputPipe, &sum);
+}
+\end{codebox}
+
+程序清单4.9 卷积内核(生产者)
+
+\begin{codebox}[cpp]
+__kernel
+void consumerKernel(
+  pipe __read_only float *inputPipe,
+  int totalPixels,
+  __global int *histogram)
+{
+  int pixelCnt;
+  float pixel;
+
+  /* Loop to process all pixels from the producer kernel */
+  for (pixelCnt = 0; pixelCnt < totalPixels; pixelCnt++)
+  {
+    /* Keep trying to read a pixel from the pipe
+     * until one becomes available */
+    while(read_pipe(inputPipe, &pixel));
+
+    /* Add the pixel value to the histogram */
+    histogram[(int)pixel]++;
+  }
+}
+\end{codebox}
+
+程序清单4.10 卷积内核(消费者)
+
+虽然，存储在管道中的数据不能被主机访问，不过在主机端还是需要使用对应的API创建对应的管道对象。其创建API如下所示：
+
+\begin{codebox}[cpp]
+cl_pipe clCreatePipe(
+  cl_context context,
+  cl_mem_flags flags,
+  cl_uint pipe_packet_size,
+  cl_uint pipe_max_packets,
+  const cl_pipe_properties *properties,
+  cl_int *errcode_ret)
+\end{codebox}
+
+我们需要考虑两个内核不是并发的情况；因此，我们就需要创建足够大的管道对象能存放下图像元素数量个包：
+
+\begin{codebox}[cpp]
+cl_mem pipe = clCreatepipe(context, 0, sizeof(float), imageRows * imageCols, NULL, &status);
+\end{codebox}
+
+利用多个设备的话，就需要在主机端多加几步。当创建上下文对象时，需要提供两个设备(一个CPU设备，一个GPU设备)，并且每个设备都需要有自己的命令队列。另外，程序对象需要产生两个内核。加载内核是，需要分别入队其各自的命令队列：生产者(卷积)内核需要入队GPU命令队列，消费者(直方图)内核需要入队CPU命令队列。完整的代码在程序清单4.11中。
+
+\begin{codebox}[cpp]
+/* System includes */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* OpenCL includes */
+#include <CL/cl.h>
+
+/* Utility functions */
+#include "utils.h"
+#include "bmp-utils.h"
+
+/* Filter for the convolution */
+static float gaussianBlurFilter[25] = {
+  1.0f / 273.0f, 4.0f / 273.0f, 7.0f / 273.0f, 4.0f / 273.0f, 1.0f / 273.0f,
+  4.0f / 273.0f, 16.0f / 273.0f, 26.0f / 273.0f, 16.0f / 273.0f, 4.0f / 273.0f,
+  7.0f / 273.0f, 26.0f / 273.0f, 41.0f / 273.0f, 26.0f / 273.0f, 7.0f / 273.0f,
+  4.0f / 273.0f, 16.0f / 273.0f, 26.0f / 273.0f, 16.0f / 273.0f, 4.0f / 273.0f,
+  1.0f / 273.0f, 4.0f / 273.0f, 7.0f / 273.0f, 4.0f / 273.0f, 1.0f / 273.0f
+};
+static const int filterWidth = 5;
+static const int filterSize = 25 * sizeof(float);
+
+/* Number of histogram bins */
+static const int HIST_BINS = 256;
+
+int main(int argc, char *argv[])
+{
+  /* Host data */
+  float *hInputImage = NULL;
+  int *hOutputHistogram = NULL;
+
+  /* Allocate space for the input image and read the
+   * data from dist */
+  int imageRows;
+  int imageCols;
+  hInputImage = readBmpFloat("../../Images/cat.bmp", &imageRows, &imageCols);
+  const int imageElements = imageRows * imageCols;
+  const size_t imageSize = imageElements * sizeof(float);
+
+  /* Allocate space for the histogram on the host */
+  const int histogramSize = HIST_BINS * sizeof(int);
+  hOutputHistogram = (int *)malloc(histogramSize);
+  if (!hOutputHistogram){ exit(-1); }
+
+  /* Use this to check the output of each API call */
+  cl_int status;
+
+  /* Get the first platform */
+  cl_platform_id platform;
+  status = clGetPlatformIDs(1, &platform, NULL);
+  check(status);
+
+  /* Get the devices */
+  cl_device_id devices[2];
+  cl_device_id gpuDevice;
+  cl_device_id cpuDevice;
+  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_CPU, 1, &gpuDevice, NULL);
+  status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &cpuDevice, NULL);
+  check(status);
+  devices[0] = gpuDevice;
+  devices[1] = cpuDevice;
+
+  /* Create a context and associate it with the devices */
+  cl_context context;
+  context = clCreateContext(NULL, 2, devices, NULL, NULL, &status);
+  check(status);
+
+  /* Create the command-queues */
+  cl_command_queue gpuQueue;
+  cl_command_queue cpuQueue;
+  gpuQueue = clCreateCommandQueue(context, gpuDevice, 0, &status);
+  check(status);
+  cpuQueue = clCreateCommandQueue(context, cpuDevice, 0, &status);
+  check(status);
+
+  /* The image desriptor describes how the data will be stored
+   * in memory. This descriptor initializes a 2D image with no pitch*/
+  cl_image_desc desc;
+  desc.image_type = CL_MEM_OBJECT_IMAGE2D;
+  desc.image_width = imageCols;
+  desc.image_height = imageRows;
+  desc.image_depth = 0;
+  desc.image_array_size = 0;
+  desc.image_row_pitch = 0;
+  desc.image_slice_pitch = 0;
+  desc.num_mip_levels = 0;
+  desc.num_samples = 0;
+  desc.buffer = NULL;
+
+  /* The image format descibes the properties of each pixel */
+  cl_image_format format;
+  format.image_channel_order = CL_R; // single channel
+  format.image_channel_data_type = CL_FLOAT;
+
+  /* Create the input image and initialize it using a
+   * pointer to the image data on the host. */
+  cl_mem inputImage;
+  inputImage = clCreateImage(context, CL_MEM_READ_ONLY, &format, &desc, NULL, NULL);
+
+  /* Create a buffer object for the ouput histogram */
+  cl_mem ouputHistogram;
+  outputHisrogram = clCreateBuffer(context, CL_MEM_WRITE_ONLY, &format, &desc, NULL, NULL);
+
+  /* Create a buffer for the filter */
+  cl_mem filter;
+  filter = clCreateBuffer(context, cl_MEM_READ_ONLY, filterSize, NULL, &status);
+  check(status);
+
+  cl_mem pipe;
+  pipe = clCreatePipe(context, 0, sizeof(float), imageRows * imageCols, NULL, &status);
+
+  /* Copy the host image data to the GPU */
+  size_t origin[3] = {0,0,0}; // Offset within the image to copy from
+  size_t region[3] = {imageCols, imageRows, 1}; // Elements to per dimension
+  status = clEnqueueWriteImage(gpuQueue, inputImage, CL_TRUE, origin, region, 0, 0, hInputImage, 0, NULL, NULL);
+  check(status);
+
+  /* Write the filter to the GPU */
+  status = clEnqueueWriteBuffer(gpuQueue, filter, CL_TRUE, 0, filterSize, gaussianBlurFilter, 0, NULL, NULL);
+  check(status);
+
+  /* Initialize the output istogram with zeros */
+  int zero = 0;
+  status = clEnqueueFillBuffer(cpuQueue, outputHistogram, &zero, sizeof(int), 0, histogramSize, 0, NULL, NULL);
+  check(status);
+
+  /* Create a program with source code */
+  char *programSource = readFile("producer-consumer.cl");
+  size_t programSourceSize = strlen(programSource);
+  cl_program program = clCreateProgramWithSource(context, 1, (const char**)&programSource, &programSourceLen, &status);
+  check(status);
+
+  /* Build (compile) the program for the devices */
+  status = clBuildProgram(program, 2, devices, NULL, NULL, NULL);
+  if (status != CL_SUCCESS)
+  {
+    printCompilerError(program, gpuDevice);
+    exit(-1);
+  }
+
+  /* Create the kernel */
+  cl_kernel producerKernel;
+  cl_kernel consumerKernel;
+  producerKernel = clCreateKernel(program, "producerKernel", &status);
+  check(status);
+  consumerKernel = clCreateKernel(program, "consumerKernel", &status);
+  check(status);
+
+  /* Set the kernel arguments */
+  status = clSetKernelArg(producerKernel, 0, sizeof(cl_mem), &inputImage);
+  status |= clSetKernelArg(producerKernel, 1, sizeof(cl_mem), &pipe);
+  status |= clSetKernelArg(producerKernel, 2, sizeof(int), &filterWidth);
+  check(status);
+
+  status |= clSetKernelArg(consumerKernel, 0, sizeof(cl_mem), &pipe);
+  status |= clSetKernelArg(consumerKernel, 1, sizeof(int), &imageElements);
+  status |= clSetKernelArg(consumerKernel, 2, sizeof(cl_mem), &outputHistogram);
+  check(status);
+
+  /* Define the index space and work-group size */
+  size_t producerGlobalSize[2];
+  producerGlobalSize[0] = imageCols;
+  producerGlobalSize[1] = imageRows;
+
+  size_t producerLocalSize[2];
+  producerLocalSize[0] = 8;
+  producerLocalSize[1] = 8;
+
+  size_t consumerGlobalSize[1];
+  consumerGlobalSize[0] = 1;
+
+  size_t consumerLocalSize[1];
+  consumerLocalSize[0] = 1;
+
+  /* Enqueue the kernels for execution */
+  status  = clEnqueueNDRangeKernel(gpuQueue, producerKernel, 2, NULL, producerGlobalSize, producerLocalSize, 0, NULL, NULL);
+
+  status = clEnqueueNDRangeKernel(cpuQueue, consumerKernel, 2, NULL, consumerGlobalSize, consumerLocalSize, 0, NULL, NULL);
+
+  /* Read the output histogram buffer to the host */
+  status = clEnqueueReadBuffer(cpuQueue, outputHistogram, CL_TRUE, 0, histogramSize, hOutputHistogram, 0, NULL, NULL);
+  check(status);
+
+  /* Free OpenCL resources */
+  clReleaseKernel(producerKernel);
+  clReleaseKernel(consumerKernel);
+  clReleaseProgram(program);
+  clReleaseCommandQueue(gpuQueue);
+  clReleaseCommandQueue(cpuQueue);
+  clReleaseMemObject(inputImage);
+  clReleaseMemObject(outputHistogram);
+  clReleaseMemObject(filter);
+  clReleaseMemObject(pipe);
+  clReleaseContext(context);
+
+  /* Free host resources */
+  free(hInputImage);
+  free(hOutputHistogram);
+  free(programSource);
+
+  return 0;
+}
+\end{codebox}
+
+程序清单4.11 生产者-消费者主机端完整代码
+
+
+
+% ---- 4.6-chinese.md ----
+\section{基本功能函数}
+
+因为OpenCL意味着对于系统来说是不可知的，有些任务不能像传统的C/C++那样自动完成。不过好消息是当相关工具代码完成后，就可以是用到所有OpenCL应用代码中。
+
+\subsection{打印编译错误信息}
+
+当我们尝试编译和链接我们的OpenCL程序对象时(使用\texttt{clBuildProgram()}、\texttt{clCompileProgram()}和\texttt{clLinkProgram()})，OpenCL C代码可能会出现错误。出现错误时，主机端不会直接显示这些编译错误，而是直接退出。通过OpenCL API的返回值，让编程者知道是编译时候的错误，并需要手动去将编译输出打印出来。
+
+当OpenCL程序对象编译失败，一个构建日志将会产生，并保存在程序对象中。该日志可以通过API \texttt{clGetProgramBuildInfo()}检索出，传入CL\_\allowbreak{}PROGRAM\_\allowbreak{}BUILD\_\allowbreak{}LOG到param\_\allowbreak{}name，得到相应日志内容。还有与其类似的API存在，\texttt{clProgramBuildInfo()}需要调用两次：第一次是获取日志的大小，分配对应大小的数组，用来放置日志内容；第二次是将日志中的具体内容取出。
+
+本章中我们自己封装了一个名为printCompilerError()的函数，用于打印OpenCL C的编译错误信息。printCompilerError()的具体实现在程序清单4.12中。
+
+\begin{codebox}[cpp]
+void printCompilerError(cl_program program, cl_device_id device)
+{
+  cl_int status;
+
+  size_t logSize;
+  char *log;
+
+  /* Get the log size */
+  status = clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &logSize);
+  check(status);
+
+  /* Allocate space for the log */
+  log = (char *)malloc(logSize);
+  if (!log){
+    exit(-1);
+  }
+
+  /* Read the log */
+  status = clGetPeogramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, logSize, log, NULL);
+  check(status);
+
+  /* Print the log */
+  printf("%s\n", log);
+}
+\end{codebox}
+
+程序清单4.12 查询程序对象编译日志的函数封装
+
+\subsection{创建一个程序字符串}
+
+第3章中，我们使用了字符数组(const char **strings)，调用\texttt{clCreateProgramWithSource()}创建程序对象。不过，将OpenCL C源直接携程字符数组是十分不便的。因此，通常的做法都是将OpenCL C源码放置在一个单独文件中，当主机端使用到的时候对改文件进行读取。
+
+使用C++时(如代码清单4.8所示)，从文件中读取字符串就简单很多。不过，当我们使用C语言时，从文件中读取字符串就需要多做一些事情。代码清单4.13就展示了，如何使用一个C函数将文件读取到一个C的字符串(字符数组)中。
+
+\begin{codebox}[cpp]
+char *readFile(const char *filename)
+{
+  FILE *fp;
+  char *fileData;
+  long fileSize;
+
+  /* Open the file */
+  fp = fopen(filename, "r");
+  if (!fp){
+    printf("Could not open file: %s\n", filename);
+    exit(-1);
+  }
+
+  /* Determine the file size */
+  if (fseek(fp, 0, SEEK_END)){
+    printf("Error read the file\n");
+    exit(-1);
+  }
+  fileSize = ftell(fp);
+  if (fileSize < 0){
+    printf("Error read the file\n");
+    exit(-1);
+  }
+  if (fseek(fp, 0, SEEK_SET)){
+    printf("Error read the file\n");
+    exit(-1);
+  }
+
+  /* Read the contents */
+  fileData = (char *)malloc(fileSize + 1);
+  if (!fileData){
+    exit(-1);
+  }
+  if (fread(fileData, fileSize, 1, fp) != 1){
+    printf("Error reading the file\n");
+    exit(-1);
+  }
+
+  /* Terminate the string */
+  fileData[fileSize] = '\0';
+
+  /* Close the file */
+  if (fclose(fp)){
+    printf("Error closing the file\n");
+    exit(-1);
+  }
+
+  return fileData;
+}
+\end{codebox}
+
+程序清单4.13 将OpenCL C源码从文件中读取出
+
+
+
+% ---- 4.7-chinese.md ----
+\section{本章总结}
+
+本章我们使用了一些著名的数据并行算法，将其使用OpenCL实现。直方图的例子展示了如何使用局部内存，并在执行阶段使用了适当的同步。旋转和卷积例子使用了图像对象和采样器。卷积例子中使用了C++ API，并将卷积核放置到常量内存中。生产者-消费者例子中，使用管道为两个内核传递所需的数据，并使用了多设备的方式实现。
+
+虽然，这些OpenCL例子都是正确的，不过其性能还可以进一步提高——有些例子可以有很大的提升。在对应硬件平台上的性能优化，将是后面章节讨论的核心。
+
+
