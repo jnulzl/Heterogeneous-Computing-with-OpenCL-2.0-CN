@@ -9,14 +9,14 @@
 
 Web应用如今普遍存在于Web浏览器中，并且云服务已成为我们访问个人和专业数据的主要方式。网页应用无需进行散布和安装就能在数亿个客户端电脑上运行。因为网页应用的跨平台特性，对于开发者非常具有吸引力。这也需要感谢互联网的快速发展，随着接连不断的移动链接，终端用户可以通过应用在任何地点、任何设备上获取自己感兴趣的信息。
 
-随着图形处理器的计算能力逐渐增强，特别是在移动端，新一代的应用编程接口(比如：WebGL和WebCL)也运应而生。这些接口可以使用设备本身所携带的硬件加速器，让图像渲染和计算在用户端更加高效，并且可以延长电池寿命。这样的API不仅在有网络连接时，不会依赖于网络信号的质量，也可以在断网的情况下对网络应用进行加速。感谢WebGL和WebCL，让Web浏览器的性能达到了一个新的高度，同时也为网络应用开辟了一个新的应用领域。
+随着图形处理器的计算能力逐渐增强，特别是在移动端，新一代的应用编程接口(比如：WebGL和WebCL)也运应而生。这些接口可以使用设备本身所携带的硬件加速器，让图像渲染和计算在用户端更加高效，并且可以延长电池寿命。这样的API让Web应用的交互性不再仅仅依赖于网络连接的质量，也可以在断网的情况下对网络应用进行加速。感谢WebGL和WebCL，让Web浏览器的性能达到了一个新的高度，同时也为网络应用开辟了一个新的应用领域。
 
 
 
 % ---- 12.2-chinese.md ----
 \section{如何使用WebCL编程}
 
-WebCL 1.0其实就是使用JavaScript实现的OpenCL 1.2。同样的OpenCL API、语法以及运行时，无需太多行代码就能完成(JavaScript是面向对象的语言)。我们通常会将WebCL与其他类似的技术联系在一起进行比较。如果你对WebGL很不了解，也没有关系。
+WebCL 1.0其实就是使用JavaScript实现的OpenCL 1.2。它在保持完全相同的API设计、语义和运行时的同时，简化了OpenCL编程(JavaScript是面向对象的语言)。我们通常会将WebCL与其他类似的技术联系在一起进行比较。如果你对WebGL很不了解，也没有关系。
 
 与OpenCL一样，WebCL的编程也是由两部分构成：
 
@@ -57,11 +57,11 @@ try{
 var ctx = webcl.createContext();
 \end{codebox}
 
-\myGraphic{0.92}{images/chapter12/12-1.png}{图12.1 WebCL对象}
+\myGraphic{0.85}{images/chapter12/12-1.png}{图12.1 WebCL对象。}
 
 图12.1中描述了WebCL中的对象结构关系。注意WebCL是接口的名字，而webcl是JavaScript的对象。更多信息可以查阅WebCL的标准[1]。
 
-Web应用无法获取平台信息之后，列出所有可以用的设备；而是通过获取到的设备信息了解对应平台，从而指定对应的设备或平台。
+Web应用不仅可以查询平台以列出可用的设备，还可以查询设备的更多信息并据此选择平台，从而指定对应的设备或平台。
 
 \begin{codebox}[javascript]
 // Find appropriate device
@@ -88,7 +88,7 @@ WebCL中定义了如下对象：
 
 \begin{itemize}
 \item \textbf{命令队列}
-\item 内存对象(\textbf{数组}和\textbf{图像})
+\item 内存对象(\textbf{缓冲区}和\textbf{图像})
 \item \textbf{采样器}对象，其描述了在内核中如何对图像进行读取
 \item \textbf{程序}对象，其包含了一些列内核函数
 \item \textbf{内核}对象，在内核源码中使用\_\allowbreak{}\_\allowbreak{}kernel声明的函数，其作为真正的执行对象
@@ -96,7 +96,7 @@ WebCL中定义了如下对象：
 \item 命令同步对象，比如\textbf{标记}和\textbf{栅栏}
 \end{itemize}
 
-首先我们需要创建程序对象。WebCL与WebGL 1.0类似，假设可以提供一段内核源码。这样的话，Web应用就需要内嵌一个编译器。源码先从设备上进行载入，之后进行编译。和其他编译器一样，OpenCL编译器也定义了一些编译选项。
+首先我们需要创建程序对象。WebCL与WebGL 1.0类似，假设可以提供一段内核源码。这样的话，Web应用就需要内嵌一个编译器。源码先被加载到设备上，然后再编译。和其他编译器一样，OpenCL编译器也定义了一些编译选项。
 
 \begin{codebox}[javascript]
 // Create the compute program from the source strings
@@ -110,14 +110,14 @@ try{
 }
 \end{codebox}
 
-如此这般，我们的程序就可以编译了，并且一个程序对象内具有一个或者多个内核函数。这些内核函数作为我们程序的入口函数，就如同静态库中的接口一样。为了区别不同的内核函数，我们需要创建WebCLKernel对象：
+如此这般，我们的程序就可以编译了，并且一个程序对象内具有一个或者多个内核函数。这些内核函数作为我们程序的入口函数，就如同共享库(动态库)的入口一样。为了区别不同的内核函数，我们需要创建WebCLKernel对象：
 
 \begin{codebox}[javascript]
 // Create the compute kernels from within the program
 var kernel = program.createKernel("kernel_function_name");
 \end{codebox}
 
-就像普通函数一样，内核函数通常都会有一些参数。JavaScript会提供一些数据类型，typed arrays[2]就是用来传递不同类型的内核参数(具体参数类型见表12.1)。对于其他类型的数据，我们可以使用WebCL对象：
+就像普通函数一样，内核函数通常都会有一些参数。由于JavaScript对数值只提供Number一种类型，typed arrays[2]就是用来传递不同类型的内核参数(具体参数类型见表12.1)。对于其他类型的数据，我们可以使用WebCL对象：
 
 \begin{itemize}
 \item WebCLBuffer和WebCLImage，可以用来包装数组
@@ -194,7 +194,7 @@ var imageFormat = {
 var image = context.createImage(webcl.MEM_READ_ONLY | webcl.MEM_USE_HOST_PTR, imageFormat, imageBuffer);
 \end{codebox}
 
-WebCLSampler告诉内核函数读和对图像数据进行读取。WebCL的采样器和WebGL的采样器类似。
+WebCLSampler描述内核读取图像时如何对其进行采样。WebCL的采样器和WebGL的采样器类似。
 
 \begin{codebox}[javascript]
 // create a smpler object
@@ -209,7 +209,7 @@ var sampler = context.createSampler(normalizedCoords, addressingMode, filterMode
 
 使用WebCLKernel.setArg()将标量、向量或内存对象以参数的形式传入内核。需要传递局部内存时，我们可以使用长度为1的Int32Array，其中的数值是需要分配多少字节的局部内存，因为局部内存不能在主机端或设备端初始化，不过主机端可以通过内核参数的形式告诉设备端要分配多少局部内存。
 
-根据经验内核所需要的所有参数，都需要是一个对象。即使是标量也也要包装在长度为1的数组中。向量根据长度放置在数组中。数组、图像和采样器都是WebCL对象。内存对象(数组和图像)需要在内核执行命令入队前，通过主机内存转移到设备内存。
+根据经验内核所需要的所有参数，都需要是一个对象。即使是标量也也要包装在长度为1的数组中。向量根据长度放置在数组中。数组、图像和采样器都是WebCL对象。内存对象(数组和图像)必须在内核执行前通过入队命令从主机内存传输到设备内存。
 
 这里展示一个例子:
 
@@ -261,7 +261,7 @@ var queue = context.createCommandQueue(device, webcl.QUEUE_OUT_OF_ORDER_EXEC_MOD
 
 命令队列在指定设备上创建。多个命令队列具有其相对应的设备。应用可以通过主机端和设备端的数据传输，重叠的执行内核。图12.2展示了将问题分成两部分可能会更快的完成：
 
-\myGraphic{0.92}{images/chapter12/12-2.png}{}
+\myGraphic{0.85}{images/chapter12/12-2.png}{图12.2 使用多个命令队列重叠数据传输。}
 
 \begin{itemize}
 \item 第一部分是主机端向设备端传输数据，分解之后只需要原来拷贝时间的一半即可完成工作。然后，执行内核，基本上也是一半的时间完成。最后将数据传回主机，同样还是原先一半的时间。
@@ -296,9 +296,9 @@ var queue = context.createCommandQueue(device, webcl.QUEUE_OUT_OF_ORDER_EXEC_MOD
 % ---- 12.3-chinese.md ----
 \section{同步机制}
 
-与C/C++的OpenCL程序一样，设备可以以同步的方式对命令队列中的命令进行处理。主机端将命令提交到命令队列中，然后可以使用clFinish()等待命令队列上所有命令执行完成。
+与C/C++的OpenCL程序一样，设备可以以异步的方式处理命令队列中的命令。主机端将命令提交到命令队列中，然后可以使用clFinish()等待命令队列上所有命令执行完成。
 
-与之相似，在WebCL中webCLCommandQueue类具有两个参数：
+与之相似，WebCLCommandQueue类中几乎所有的命令都有最后两个参数：
 
 \begin{enumerate}
 \item event\_\allowbreak{}list——一个WebCLEevet数组
@@ -366,11 +366,11 @@ WebGL需要先创建上下文，然后再创建一个共享的WebCL上下文。�
 
 \begin{itemize}
 \item 纹理对象：包含图像的纹理信息
-\item 顶点数组对象：包含顶点信息，比如坐标、颜色和法向量
+\item 顶点缓冲区对象：包含顶点数据，比如坐标、颜色和法向量
 \item 渲染数组对象：包含图像对象所用到的WebGL帧缓存对象[4]
 \end{itemize}
 
-\myGraphic{0.92}{images/chapter12/12-3.png}{图12.3 运行时调用WebCL和WebGL}
+\myGraphic{0.85}{images/chapter12/12-3.png}{图12.3 同时用到WebCL和WebGL的典型运行时。}
 
 \myRefRule
 
@@ -385,11 +385,11 @@ WebGL需要先创建上下文，然后再创建一个共享的WebCL上下文。�
 % ---- 12.5-chinese.md ----
 \section{应用实例}
 
-对于图像处理应用，通常会将轨迹跟踪输出到屏幕上。对于这样的应用，其表面都会使用多个三角形进行构成，然后通过WebGL进行渲染。计算内核代码提供了更加自由的方式，方便我们对通用计算进行优化。片元渲染器相较计算渲染器要难优化许多。更重要的是，纹理内存是缓存在处理器中，这样要比通过全局内存的方式访问CPU内存高效的多。不过，有些设备不支持图像内存，可以使用WebCLBuffer创建像素数组对象，从而更新WebGL的纹理。
+图像处理和光线跟踪这类应用会产生一幅输出到屏幕上的图像。对于这样的应用，其表面都会使用多个三角形进行构成，然后通过WebGL进行渲染。计算内核代码提供了更加自由的方式，方便我们对通用计算进行优化。片元渲染器相较计算渲染器要难优化许多。更重要的是，纹理内存是缓存在处理器中，这样要比通过全局内存的方式访问CPU内存高效的多。不过，有些设备不支持图像内存，可以使用WebCLBuffer创建像素数组对象，从而更新WebGL的纹理。
 
 本节中，我们使用Iñigo Quilez片元渲染器所渲染的影子玩具——曼德尔球[1]，将这个例子转化成一个WebCL内核，如图12.4所示。WebGL使用两个纹理三角形对画面进行填充。WebCL每帧都会生成新的纹理。因此，考虑到画布的大小(width，height)，WebCL将会生成width x height个像素点。
 
-\myGraphic{0.92}{images/chapter12/12-4.png}{图12.4 WebGL中两个三角形可以画一幅WebCL生成的图像。}
+\myGraphic{0.85}{images/chapter12/12-4.png}{图12.4 在WebGL中用两个三角形绘出WebCL生成的图像。}
 
 当WebCL要使用WebGL内存进行计算时，WebGL上下文必须要进行初始化，并且在WebGL上下文上共享产生WebCL的上下文，然后就可以WebCL就能使用WebGL的相关内存对象进行计算。下面的代码中展示了，如何创建WebGL的纹理，并且将其用于WebCL进行计算：
 
@@ -454,23 +454,23 @@ void compute(__write_only image2d_t pix, uint width, uint height){
 % ---- 12.6-chinese.md ----
 \section{增强安全性}
 
-安全性是各个Web浏览器公司非常重视的问题。你会将浏览器作为打开JavaScript脚本的默认程序吗？出于对未知程序的怀疑，其中可能包含有一些访问系统数据的操作，可能会从你的电脑中盗取数据，或是向你的电脑安装病毒或者木马。恶意脚本还会让计算机对资源的使用能力降低，甚至是让其崩溃。
+安全性是各个Web浏览器公司非常重视的问题。还记得以前没有人在浏览器中默认开启JavaScript的日子吗？出于对未知程序的怀疑，其中可能包含有一些访问系统数据的操作，可能会从你的电脑中盗取数据，或是向你的电脑安装病毒或者木马。恶意脚本还可能耗尽所有资源，使计算机瘫痪。
 
 WebGL和WebCL的例子中，其代码是为了使用GPU从而将性能最大化，不过当前的GPU缺少相应的硬件机制，一个程序中的相应内存不能被其他程序所访问到，这就需要内存保护和读取未初始化数据的机制。
 
-保护机制的创建可以保证内核在WebCL中运行时，不会访问越界。WebCL中的内核可以以文本的形式传入，然后通过WebCL内置的编译器进行编译。当然，使用预编译文件的方式对于程序和数字签名处理来说更加安全，不过目前为止没有相应的内核二进制文件的格式标准。
+保护机制的创建可以保证内核在WebCL中运行时，不会访问越界。WebCL中的内核可以以文本的形式传入，然后通过WebCL内置的编译器进行编译。当然，如果存在验证程序安全性的方法和数字签名流程，也本可以允许预编译程序，不过目前为止没有相应的内核二进制文件的格式标准。
 
-两个能保护内存的准则：1. 分配的内存需要初始化(程序不能访问旧数据)；2. 访问合法内存的代码可以置为可信。
+两个能保护内存的准则：1. 分配的内存需要初始化(程序不能访问旧数据)；2. 不可信的代码不得访问非法的内存。
 
 下面的机制可用来保证程序的安全性：
 
 \begin{itemize}
 \item 持续跟踪内存分配(如果平台支持动态分配，需要在运行时进行跟踪)
 \item 监视合法读取的内存范围
-\item 合法的数据砸编译和运行时，会显得更加高效
+\item 在编译程序时或运行时高效地校验这些范围
 \end{itemize}
 
-内核在传递时，需要使用一个校验器对其内容进行校验，以确保不存在访问越界的情况，不过这将影响(经测量，性能要比无校验的性能低30\%)。更多安全性的信息可以参阅[1]。
+内核在传递时，需要使用一个校验器对其内容进行校验，以确保不存在访问越界的情况，不过这将影响(经测量，性能下降不到30\%)。更多安全性的信息可以参阅[1]。
 
 \myRefRule
 
@@ -490,7 +490,7 @@ WebCL为计算而生，其可以使用在浏览器中，也可以使用与单独
 安装\emph{node-webcl}要比安装浏览器麻烦许多。其作为开发工具，需要依赖一些第三方库，并且需要重新编译。
 
 \begin{itemize}
-\item 首先，确认OpenCL的SDK能够使用你的CPU和GPU： - 对于Intel GPU，从\href{https://software.intel.com/en-us/vcsource/tools/opencl-sdk}{这里}下载SDK - 对于AMD GPU，从\href{https://developer.amd.com/tools-and-sdks/opencl-zone/amd-accelerated-paralled-processing-app-sdk}{这里}下载SDK - 对于NVIDIA GPU，从\href{https://developer.nvidia.com/opencl}{这里}下载SDK
+\item 首先，确认已为你的GPU和/或CPU安装OpenCL SDK： - 对于Intel GPU，从\href{https://software.intel.com/en-us/vcsource/tools/opencl-sdk}{这里}下载SDK - 对于AMD GPU，从\href{https://developer.amd.com/tools-and-sdks/opencl-zone/amd-accelerated-paralled-processing-app-sdk}{这里}下载SDK - 对于NVIDIA GPU，从\href{https://developer.nvidia.com/opencl}{这里}下载SDK
 \item 从\href{http://nodejs.org}{这里}安装Node.js
 \item 安装node-gyp:npm install -g node-gyp
 \item 安装node-image: - 在\href{http://freeimage.sourceforge.net}{这里}下载FreeImage库和头文件 - npm install node-image
@@ -518,15 +518,15 @@ var webcl = require('node-webcl');
 
 将代码中的"require('node-webcl')"换成webcl=window.webcl就能让这段代码在支持WebCL的浏览器中生效。通过node-webcl，我们就能使用操作系统中的访问方式，并且能使用所有Node.js中的模块。
 
-在Node.js中使用node-webcl，无论是对服务器上的计算进行加速，还是对浏览器的Web接口的交互进行加速[4]，对于网络访问都是十分有意义的事情[5]。
+在Node.js中使用node-webcl，在服务器上执行加速计算，并通过WebSocket把结果传给浏览器[4]，对于网络访问都是十分有意义的事情[5]。
 
-同样，不同的应用使用的编程框架也不同，比如:Python, R和MATLAB等。脚本语言提供一些特性，也可以用于JavaScript。虽然框架不同，但是很多运行时库也存在有JavaScript版本(甚至有工具能直接将其他脚本语言的代码，直接转换成JavaScript)。目前通过使用Node.js，JavaScript在现有的脚本语言框架中的性能是相对好的。
+同样，不同的应用使用的编程框架也不同，比如:Python, R和MATLAB等。脚本语言提供一些特性，也可以用于JavaScript。虽然框架不同，但是很多运行时库也存在有JavaScript版本(甚至有工具能直接将其他脚本语言的代码，直接转换成JavaScript)。目前通过使用Node.js，JavaScript配合node.js成为一个统一各种框架和语言的更快的平台。
 
-因为node-webcl的限制要比浏览器少，所以相关应用的开发进程通常会更快，并且性能还不错。由于Node.js的原因，也有很多动态和多线程应用也会使用JavaScript开发，不过这些应用可能不会在浏览器端使用。这些应用就是典型的服务器端应用，其需要在当前平台上的所有支持OpenCL的设备上，对复杂的负载进行调度。
+因为node-webcl的限制要比浏览器少，所以相关应用的开发进程通常会更快，并且性能还不错。由于Node.js的原因，也有很多动态和多线程应用也会使用JavaScript开发，而这些应用在浏览器中可能是无法实现的。这些应用就是典型的服务器端应用，其需要在当前平台上的所有支持OpenCL的设备上，对复杂的负载进行调度。
 
 随着Node.js和node-webcl的使用，基于JavaScript的应用可以快速的部署在服务器端和客户端。当前，一些数据敏感的实时应用，已经可以使用JavaScript完成。
 
-目前，一个新的Node.js模块出现，其名为node-opencl[6]。其与node-webcl为同一个开发者，node-opencl是对node-webcl的重写。node-opencl要比node-webcl更加底层，其可以让JavaScript直接使用OpenCL的特性。WebCL只支持OpenCL 1.1，不过node-opencl支持所有版本的OpenCL。其他人可以使用JavaScript在node-opencl的基础上开发出自己的WebCL。不过，所有WebCL实现都会随着时间的推移，对特性进行增强，对Bug进行修复。所以，目前node-opencl和node-webcl都被Node.js所支持。
+目前，一个新的Node.js模块出现，其名为node-opencl[6]。其与node-webcl为同一个开发者，node-opencl是对node-webcl的重写。node-opencl要比node-webcl更加底层，其可以让JavaScript直接使用OpenCL的特性。WebCL只支持OpenCL 1.1，不过node-opencl支持所有版本的OpenCL。其他人可以使用JavaScript在node-opencl的基础上开发出自己的WebCL。不过，其他WebCL实现的维护都比较零散，而node-opencl和node-webcl则得到了积极的维护。
 
 \myRefRule
 
@@ -562,7 +562,7 @@ WebCL 1.0已经在2014年3月14日发布，并且标准组织也已经准备好�
 
 AMD开发的node-opencl服务器版本，使用node.js包装的OpenCL。[7]
 
-一致性测试用例也在2014完成，这些测试例可以用来帮助Web浏览器供应商，检验其旗下浏览器对WebCL的支持程度。
+一致性测试用例也在2014完成，这有助于Web浏览器供应商发布支持WebCL的更新版本。
 
 \myRefRule
 

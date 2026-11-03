@@ -14,9 +14,9 @@
 % ---- 13.2-chinese.md ----
 \section{越过C和C++}
 
-对于很多开发者来说，他们会选择C和C++作为开发语言。其他的一些开发者则可能会选择别的编程语言，我们所知的很多软件是使用Java或Python开发的。这些更高级的语言有更高的生产力，通常会提供很多必要的特性(比如，垃圾收集)，这些语言在前端的开发者中更加好用。这些语言还有一种特点，可移植性特别好，想想Java的口号“一次编写，处处可用”，这样开发者就不需要为一些系统底层的问题而困扰。不过，由于无法接近底层，我们用这样语言编写出来的程序，性能无法达到最佳。
+对于很多开发者来说，他们会选择C和C++作为开发语言。其他的一些开发者则可能会选择别的编程语言，我们所知的很多软件是使用Java或Python开发的。这些更高级的语言有更高的生产力，通常会提供很多必要的特性(比如，垃圾收集)，而性能并不一定是系统设计者首要考虑的因素。这些语言还有一种特点，可移植性特别好，想想Java的口号“一次编写，处处可用”，这样开发者就不需要为一些系统底层的问题而困扰。但通常很难、有时甚至不可能让这类语言编写的应用达到接近峰值的性能。
 
-为了弥补性能鸿沟，并且不需要将很多已有库使用这类语言重新再写一遍。我们这里会使用\emph{外部函数接口}(FFI，foreignfunctioninterface)，其可以让应用调用使用C和C++(或其他低层语言)编写的原生库。例如，Java提供了Java原生接口，Python也有同样的机制。当然，Java和Python也有已经包装好的OpenCL库(JOCL(Java bindings for OpenCL)[1], PyOpenCL[2])，可以让开发者直接调用。这种模型的确是非常底层，并且这种模型能够管理应用运行库，还有(库内无管理的)OpenCL原生代码库。为了展示这种代码的特点，代码清单13.1中展示了一个PyOpenCL版本的向量相加。
+为了弥补性能鸿沟，并且不需要将很多已有库使用这类语言重新再写一遍。我们这里会使用\emph{外部函数接口}(FFI，foreignfunctioninterface)，其可以让应用调用使用C和C++(或其他低层语言)编写的原生库。例如，Java提供了Java原生接口，Python也有同样的机制。当然，Java和Python也有已经包装好的OpenCL库(JOCL(Java bindings for OpenCL)[1], PyOpenCL[2])，可以让开发者直接调用。这种模型的确是非常底层，并在托管运行时与OpenCL的原生非托管部分之间提供连接。为了展示这种代码的特点，代码清单13.1中展示了一个PyOpenCL版本的向量相加。
 
 \begin{codeboxt}[python]{代码清单13.1 PyOpenCL实现的向量相加}
 import pyopencl as cl
@@ -50,7 +50,7 @@ cl.enqueue_copy(queue, a_plus_b, dest_buf)
 print la.norm(a_plus_b - (a + b))
 \end{codeboxt}
 
-下面的例子使用同样的一种包装API——Aparapi[3]——进行实现(之前是由AMD主导进行开发，不过现在已经是一款开源项目)。Aparapi允许Java开发者使用GPU，将一些可以进行数据并行的代码段放到GPU上运行。Aparapi运行时为了使用GPU，会将这部分代码写入Java字节码中。如果，因为某些原因Aparapi无法运行在GPU上，其会使用Java线程池进行数据并发的处理。Aparapi的意义在于，保持Java语言的语法，并发其精神。下面我们还会用向量相加展示Aparapi的使用方式(代码清单13.2)，其会调用OpenCL C代码或调用OpenCL的API。
+下面的例子使用同样的一种包装API——Aparapi[3]——进行实现(之前是由AMD主导进行开发，不过现在已经是一款开源项目)。Aparapi允许Java开发者使用GPU，将一些可以进行数据并行的代码段放到GPU上运行。Aparapi运行时会把Java字节码转换为OpenCL，再到GPU上执行。如果，因为某些原因Aparapi无法运行在GPU上，其会使用Java线程池进行数据并发的处理。Aparapi的意义在于，保持Java语言的语法，并发其精神。下面我们还会用向量相加展示Aparapi的使用方式(代码清单13.2)，其中没有任何OpenCL C代码，也没有OpenCL API调用。
 
 \begin{codeboxt}[java]{代码清单13.2 使用Aparapi实现的OpenCL，在Java中实现的向量相加}
 package com.amd.aparapi.sample.add;
@@ -85,9 +85,9 @@ public class Main{
 }
 \end{codeboxt}
 
-另外，Aparapi开发者要是用OpenCL，需要创建出一个Aparapi类的实例，在运行时重载内核函数的实现(内核函数可被动态编译)，从而产生对应的Java字节码。
+另外，Aparapi开发者要是用OpenCL，需要创建出一个Aparapi类的实例，在运行时重载内核函数的实现(内核函数可被动态编译)，并最终由生成的Java字节码动态编译为OpenCL。
 
-Aparapi通常会嵌入一些\emph{特定领域专属语言}(DSL，domain-specific language)中，主机端编码语言可以是另外一种语言(本例中主机端是Java)。DSL专注于为该领域的专家提供相应接口，并且DLS通常会为给定的学术领域提供一组特定的特性——例如，医学图像。本例中，使用的领域是通用计算，实现的功能是数据并行计算。
+Aparapi是把特定领域专属语言(DSL)嵌入到宿主语言中的一个更一般概念的实例，主机端编码语言可以是另外一种语言(本例中主机端是Java)。DSL专注于为该领域的专家提供相应接口，并且DLS通常会为给定的学术领域提供一组特定的特性——例如，医学图像。本例中，使用的领域是通用计算，实现的功能是数据并行计算。
 
 \myRefRule
 
@@ -106,16 +106,16 @@ Aparapi通常会嵌入一些\emph{特定领域专属语言}(DSL，domain-specifi
 % ---- 13.3-chinese.md ----
 \section{Haskell中使用OpenCL}
 
-Haskell是一种纯函数式语言，其属于类\href{https://en.wikipedia.org/wiki/ML\_(programming\_language}{标准ML(SML)})模型函数语言的一种。与其他已经提过的语言不同，Haskell(或SML)编程是通过函数式进行描述，应用会通过表达式的参数对表达式做出对应的判断。通常，编程的顺序不同会导致不同的结果。这会使外部声明的值没有进行初始化。这就能看出Haskell类语言的主要优势和劣势。因为Haskell在编程时的劣势很突出，并且其复杂的类型系统，通常会让一些有过C、C++、Java经验的开发者在第一次使用时，有些难以驾驭的感觉。不过，这些问题会在并行程序中解决，例如这个例子，其表达式计算出来的结果是相互独立的，所以其函数式定义是线程安全的。因此，Haskell开发者社区中，逐渐涌现出很多有意思的并行程序。对Haskell感兴趣的读者可以读去一下Hutto写的这本使用Haskell编程的书籍[1]，以及Meijer在微软频道9中的相关教学视频[2]。
+Haskell是一种纯函数式语言，其属于类\href{https://en.wikipedia.org/wiki/ML\_(programming\_language}{标准ML(SML)})模型函数语言的一种。与其他已经提过的语言不同，Haskell(或SML)编程是通过函数式进行描述，应用会通过表达式的参数对表达式做出对应的判断。总体而言，该模型与命令式编程的区别在于不定义语句的顺序，也不允许副作用。这会使外部声明的值没有进行初始化。这就能看出Haskell类语言的主要优势和劣势。把无副作用的编程与Haskell庞大而复杂的类型系统结合起来，通常会让一些有过C、C++、Java经验的开发者在第一次使用时，有些难以驾驭的感觉。不过，这些问题会在并行程序中解决，例如这个例子，其表达式计算出来的结果是相互独立的，所以其函数式定义是线程安全的。因此，Haskell开发者社区中，逐渐涌现出很多有意思的并行程序。对Haskell感兴趣的读者可以读去一下Hutto写的这本使用Haskell编程的书籍[1]，以及Meijer在微软频道9中的相关教学视频[2]。
 
 通过多方面对Haskell类型系统的论证，不过对于内嵌DSL的设计来说其Haskell类型系统是一个很不错的平台，其能提供相应的抽象化模型，这样的模型能够自动的为GPU编译源码。Accelerate[3]和Obsidian[4]是两个非常不错的例子。不过，本书着重与使用底层OpenCL进行编程，所以我们依旧只会关注，如何让Haskell的编程者通过OpenCL使用GPU。Haskell使用OpenCL，除了带来性能收益，还能获得：
 
 \begin{itemize}
-\item OpenCL能够分担目前CPU多线程库的工作负载
+\item OpenCL能为Haskell带来现有CPU线程库无法达到的性能
 \item 高级Haskell语言能够减少OpenCL主机端代码的复杂度，可以创建更加高效的开发环境
 \end{itemize}
 
-目前，有很多Haskell程序已经使用包装好的OpenCL API；不过，我们需要使用FFI的方式对OpenCL进行绑定。另外，我们需要更加简单的使用OpenCL，并且还要能发挥OpenCL强大的计算能力。为了达到这一目标，我们会推荐HOpenCL[5]，其为一个开源项目库，提供了对底层OpenCL的包装，并且提供高级的Haskell接口来访问OpenCL API，其消除了很多与OpenCL平台之间的交互，并且比其他的Haskell实现，额外的提供了更强的静态保证。本节剩下的内容，我们将着重与高级的API；不过，对低级API感兴趣的读者，可以去查看HOpenCL的手册和开发者文档。这里需要注意的是，HOpenCL只支持OpenCL 1.2的API。OpenCL 2.0中所添加的新特性，还未加入HOpenCL中。
+已经有过不止一次为Haskell开发OpenCL包装API的尝试；不过，我们需要使用FFI的方式对OpenCL进行绑定。另外，我们需要更加简单的使用OpenCL，并且还要能发挥OpenCL强大的计算能力。为了达到这一目标，我们会推荐HOpenCL[5]，其为一个开源项目库，提供了对底层OpenCL的包装，并且提供高级的Haskell接口来访问OpenCL API，其消除了很多与OpenCL平台之间的交互，并且比其他的Haskell实现，额外的提供了更强的静态保证。本节剩下的内容，我们将着重与高级的API；不过，对低级API感兴趣的读者，可以去查看HOpenCL的手册和开发者文档。这里需要注意的是，HOpenCL只支持OpenCL 1.2的API。OpenCL 2.0中所添加的新特性，还未加入HOpenCL中。
 
 我们依旧会使用向量相加作为例子。内核代码不会改变，并且直接嵌入到一个字符串中，而需要改变的则是Haskell主机端代码。
 
@@ -134,7 +134,7 @@ HOpenCL将实现的一小部分模块放入Langauage.OpenCL结构体中。
 
 \subsection{环境}
 
-很多OpenCL函数需要一个上下文对象，其用来定义OpenCL的执行环境；或是需要一个命令队列对象，提交到队列中的任务将在指定的OpenCL环境中执行。很多OpenCL代码中，有些参数函数作为“噪音”——只是技术上需要，其不会对代码进行很大的修改。为了获得这些信息，HOpenCL提供了两个类，Contextual和Queued。这两个类型的实例可以传入相关的OpenCL API中，执行相应的任务。
+很多OpenCL函数需要一个上下文对象，其用来定义OpenCL的执行环境；或是需要一个命令队列对象，提交到队列中的任务将在指定的OpenCL环境中执行。很多OpenCL代码中，有些参数函数作为“噪音”——它们在大部分代码中不会发生变化。为了获得这些信息，HOpenCL提供了两个类，Contextual和Queued。这两个类型的实例可以传入相关的OpenCL API中，执行相应的任务。
 
 通常，使用HOpenCL的应用会使用嵌入计算的方式，这就需要在其他计算式中进行计算——例如，将Queued计算嵌入Contextual计算中，然后尝试将其联系在一起。这里提供的with函数，就是用来完成这件事的：
 
@@ -171,7 +171,7 @@ withNew :: (Wraps t m n, Lifespan t, CatchIO n) => n t -> m u -> n u
 platforms :: MonadIO m => m [Platform]
 \end{codebox}
 
-与C API不同，这里无需对platform查找函数调用两次；HOpenCL将会自动获取全部平台信息。这里唯一麻烦的地方在于，平台信息的返回值为monad m，其是一个MonadIO类的实例，platforms的结果包含在这个实例当中。OpenCL在执行操作时有一定的约束，对于monad对象只能进行输入或输出操作。所有HOpenCL中的OpenCL操作都适用于此限制，所以通过API的方式获取平台信息是不安全的操作，因此需要顺序执行一些操作。
+与C API不同，这里无需对platform查找函数调用两次；HOpenCL将会自动获取全部平台信息。这里唯一麻烦的地方在于，平台信息的返回值为monad m，其是一个MonadIO类的实例，platforms的结果包含在这个实例当中。OpenCL在执行操作时有一定的约束，对于monad对象只能进行输入或输出操作。所有HOpenCL中的OpenCL操作都适用于此限制，这是为了体现底层API可能执行不安全的操作，因此需要顺序执行一些操作。
 
 检查完平台信息之后，可以对(?)操作符进行重载，用来决定我们使用对应平台上的哪种实现。例如，下面的代码就代表我们选择第一个平台作为实现平台，且答应出相应供应商：
 
@@ -194,7 +194,7 @@ putStrLn .("Platform is by: "++) =<< p ? PlatformVendor
 
 简单的对OpenCL C++包装API的实现(clGetXXXInfo)，可以通过(?)操作符进行相关信息的返回(需要额外的层提供明确的静态类型)。例如，例子中的PlatformVendor，其返回值的类型就是Haskell中的String类型。
 
-devices函数返回与一个平台相关的一系列设备。其将平台对象和设备类型作为参数传入。设备类型只能传入GPU、CPU或ALL。和platforms一样，可以通过(?)操作符对设备信息进行检索：
+devices函数返回与一个平台相关的一系列设备。其将平台对象和设备类型作为参数传入。设备类型参数可以把设备限定为仅GPU、仅CPU、所有设备，或其它选项。和platforms一样，可以通过(?)操作符对设备信息进行检索：
 
 \begin{codebox}[haskell]
 deviceOfType :: MonadIO m => Platform -> [DeviceType] -> m [Device]
@@ -212,13 +212,13 @@ context函数可以根据平台和一组设备对象创建出一个上下文对�
 context :: MonadIO m => Platform -> [Device] -> m Context
 \end{codebox}
 
-如果需要严格控制上下文的生命周期——例如，进行图像交互——然后，通过使用contextFromProperties函数将属性传入上下文：
+如果需要限定上下文的范围——例如，进行图像交互——然后，通过使用contextFromProperties函数将属性传入上下文：
 
 \begin{codebox}[haskell]
 contextFromProperties :: MonadIO m => ContextProperties -> [Device] -> m Context
 \end{codebox}
 
-上下文属性也可以传noProperties(其定义了一组空属性值)，pushContextProperty(其可以添加一个已创建上下文的属性值)。noProperties和pushContextProperty作为Language.OpenCL.Host.Core结构中的一部分:
+上下文属性也可以传noProperties(其定义了一组空属性值)，pushContextProperty(它向已有的属性集合中添加一个上下文属性)。noProperties和pushContextProperty作为Language.OpenCL.Host.Core结构中的一部分:
 
 \begin{codebox}[haskell]
 noProperties :: ContextProperties
@@ -233,7 +233,7 @@ pushContextProperty :: ContextProperty t u => t u -> u -> ContextProperties -> C
 queuue :: Contextual m => Device -> m CommandQueue
 \end{codebox}
 
-命令队列创建后，引用计数开始，并且会向指定Contextual类实例中的设备进行命令的提交。queue函数的实现通常会合并withNew函数，通过嵌入当前上下文创建命令队列：
+由于命令队列是引用计数的，并且定义在特定的Contextual计算中。queue函数的实现通常会合并withNew函数，通过嵌入当前上下文创建命令队列：
 
 \begin{codebox}[haskell]
 withNew (queue gpu) $
@@ -358,6 +358,6 @@ main = do (p:_) <- platforms
 % ---- 13.4-chinese.md ----
 \section{本章总结}
 
-本章，我们看到了在不使用C和C++编程语言，使用其他编程语言的情况下，我们依旧可以使用OpenCL。对于相对高级的语言来说，我们更加看中生产力的大小。还关注了一下函数编程语言是如何进行OpenCL编程的，并用Haskell完成了一个例子。
+本章，我们看到了在不使用C和C++编程语言，使用其他编程语言的情况下，我们依旧可以使用OpenCL。我们指出许多语言(包括Java和Python)都有可用于生产的OpenCL绑定。还关注了一下函数编程语言是如何进行OpenCL编程的，并用Haskell完成了一个例子。
 
 

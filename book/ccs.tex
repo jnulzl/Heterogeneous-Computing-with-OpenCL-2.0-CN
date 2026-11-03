@@ -294,15 +294,18 @@
 \newif\ifmyGraphicCapBold
 \myGraphicCapBoldtrue
 \ExplSyntaxOn
-% 插图（不浮动，紧跟正文； caption 为图注文字）
-% 图注：8bp
+% 插图（浮动放置； caption 为图注文字，图注：8bp）
+%
+% 为什么用 figure 浮动体而不是就地插入：
+%   就地插入时，整幅图是一个不可拆分的块，若当前页剩余空间不够，TeX 会把
+%   「图 + 图注」连同其后的正文一起推到下一页，当前页底部就留下一大片空白
+%   （本书有 20 处，最大 400pt）。浮动放置让图落到页面顶部或底部，正文继续
+%   填充当前页，版面立刻变紧凑，也更接近原书（Morgan Kaufmann）的排版。
+% [!htbp] 保证「优先就地、其次页顶、页底、独立页」，图不会被拖太远。
 \NewDocumentCommand { \myGraphic } { mmm }
 {
-  \par\medskip\noindent
-  \begin{center}
-    \includegraphics[width=#1\textwidth,height=0.86\textheight,keepaspectratio]{#2}
-  \end{center}
-  \nopagebreak
+  \begin{figure}[!htbp]
+  \noindent\makebox[\textwidth][c]{\includegraphics[width=#1\textwidth,height=0.86\textheight,keepaspectratio]{#2}}\par
   \tl_if_blank:nF {#3}
    {
     \vspace{3bp}\noindent
@@ -312,9 +315,9 @@
        \parbox{\textwidth}{\centering #3}%
      \else
        \hspace*{-\myGraphicCapHang}\parbox{\dimexpr\textwidth+\myGraphicCapHang\relax}{#3}%
-     \fi}\par
+     \fi\par}
    }
-  \medskip
+  \end{figure}
 }
 \ExplSyntaxOff
 
